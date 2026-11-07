@@ -772,4 +772,167 @@ jobs:
                 if (bm != null) iv.setImageBitmap(bm);
                 else {
                   iv.setImageDrawable(null);
-                  final ImageView target = iv; fin
+                  final ImageView target = iv; final String key = img.key(); final String part = img.part, nm = img.name;
+                  pool.execute(() -> {
+                    if (!key.equals(target.getTag())) return;
+                    Bitmap t = Apk.decode(proj, part, nm, 200);
+                    if (t == null) return;
+                    cache.put(key, t);
+                    runOnUiThread(() -> { if (key.equals(target.getTag())) target.setImageBitmap(t); });
+                  });
+                }
+                return cell;
+              }
+            }
+
+            void details(Apk.Img img) {
+              LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setPadding(dp(16), dp(10), dp(16), dp(6));
+              ImageView big = new ImageView(this); big.setScaleType(ImageView.ScaleType.FIT_CENTER); big.setBackgroundColor(0xFF232B47);
+              l.addView(big, new LinearLayout.LayoutParams(-1, dp(240)));
+              TextView meta = U.tv(this, img.key(), 12, 0xFF555555); meta.setPadding(0, dp(8), 0, dp(4)); l.addView(meta);
+              CheckBox cbAll = new CheckBox(this); cbAll.setText("غيّر كل الصور المشابهة إلها (بكل الأحجام والمجلدات)"); cbAll.setChecked(allDens); l.addView(cbAll);
+              l.addView(U.tv(this, "كل صورة تاخذ نفس حجمها ومكانها الأصلي بالضبط.", 12, 0xFF555555));
+              if (Apk.isNinePatch(img.name)) l.addView(U.tv(this, "⚠️ هاي صورة 9-patch (خلفيات أزرار). تغييرها ممكن يخرّب شكل التطبيق.", 12, 0xFFB45309));
+              new Thread(() -> {
+                Bitmap bm = Apk.decode(proj, img.part, img.name, 900); int[] d = Apk.dims(proj, img.part, img.name);
+                runOnUiThread(() -> { big.setImageBitmap(bm); meta.setText(img.key() + "\n" + d[0] + "×" + d[1] + " · " + (img.size / 1024) + " KB" + (img.replaced ? " · ✏️ معدّلة" : "")); });
+              }).start();
+              AlertDialog.Builder bd = new AlertDialog.Builder(this).setTitle(shortName(img.name)).setView(l)
+                .setPositiveButton("🖼 تغيير الصورة", (x, y) -> {
+                  allDens = cbAll.isChecked(); pendingImg = img;
+                  Intent i = new Intent(Intent.ACTION_GET_CONTENT); i.setType("image/*");
+                  startActivityForResult(Intent.createChooser(i, "اختار الصورة الجديدة"), REQ_IMG);
+                })
+                .setNeutralButton("⬇ حفظها", (x, y) -> saveImage(img));
+              if (img.replaced) bd.setNegativeButton("↩ رجّع الأصلية", (x, y) -> {
+                boolean grp = cbAll.isChecked();
+                U.runBg(this, "إرجاع الأصلية", p -> {
+                  List<String[]> targets = grp ? Apk.similar(proj, img.part, img.name, p) : Collections.singletonList(new String[]{ img.part, img.name });
+                  return Apk.restoreTargets(proj, targets);
+                }, r -> { @SuppressWarnings("unchecked") List<String> t = (List<String>) r; afterChange(t); U.toast(this, "رجعت الصور الأصلية"); });
+              });
+              bd.show();
+            }
+            void saveImage(Apk.Img img) {
+              U.runBg(this, "حفظ الصورة", p -> {
+                File r = proj.repl(img.part, img.name); ZipFile zip = proj.zip(img.part);
+                String mime = img.name.toLowerCase(Locale.ROOT).endsWith(".png") ? "image/png" : img.name.toLowerCase(Locale.ROOT).endsWith(".webp") ? "image/webp" : "image/jpeg";
+                try (InputStream in = r.exists() ? new FileInputStream(r) : zip.getInputStream(zip.getEntry(img.name))) {
+                  return Apk.saveToDownloads(this, in, shortName(img.name), mime);
+                }
+              }, x -> U.toast(this, "انحفظت بمجلد التنزيلات Download"));
+            }
+            @Override protected void onActivityResult(int req, int res, Intent data) {
+              if (req != REQ_IMG || res != RESULT_OK || data == null || data.getData() == null || pendingImg == null) return;
+              Uri u = data.getData(); Apk.Img im = pendingImg;
+              if (!allDens) { apply(Collections.singletonList(new String[]{ im.part, im.name }), u); return; }
+              U.runBg(this, "البحث عن الصور المشابهة", p -> Apk.similar(proj, im.part, im.name, p), r -> {
+                @SuppressWarnings("unchecked") List<String[]> found = (List<String[]>) r;
+                if (found.size() <= 1) { apply(found, u); return; }
+                confirmTargets(found, u);
+              });
+            }
+            /* يبين الصور المشابهة اللي لكاها، وتكدر تشيل أي وحدة ما تريدها */
+            void confirmTargets(List<String[]> found, Uri u) {
+              LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setPadding(dp(12), dp(6), dp(12), dp(6));
+              l.addView(U.tv(this, "لكيت " + found.size() + " صور مشابهة. شيل الصح عن أي وحدة ما تريد تغيّرها:", 13, 0xFF444444));
+              List<CheckBox> boxes = new ArrayList<>();
+              for (String[] t : found) {
+                LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL); row.setPadding(0, dp(4), 0, dp(4));
+                ImageView iv = new ImageView(this); iv.setBackgroundColor(0xFF232B47); iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                row.addView(iv, new LinearLayout.LayoutParams(dp(64), dp(48)));
+                CheckBox cb = new CheckBox(this); cb.setChecked(true); cb.setTextSize(11);
+                cb.setText(shortName(t[1]) + "\n" + t[1].substring(0, Math.max(0, t[1].lastIndexOf('/'))) + (t[0].isEmpty() ? "" : " · " + t[0]));
+                row.addView(cb, new LinearLayout.LayoutParams(0, -2, 1));
+                boxes.add(cb); l.addView(row);
+                new Thread(() -> {
+                  Bitmap b = Apk.decode(proj, t[0], t[1], 96); int[] d = Apk.dims(proj, t[0], t[1]);
+                  runOnUiThread(() -> { iv.setImageBitmap(b); cb.setText(cb.getText() + "\n" + d[0] + "×" + d[1]); });
+                }).start();
+              }
+              ScrollView sv = new ScrollView(this); sv.addView(l);
+              new AlertDialog.Builder(this).setTitle("الصور المشابهة").setView(sv)
+                .setPositiveButton("غيّر المختارة", (x, y) -> {
+                  List<String[]> sel = new ArrayList<>();
+                  for (int k = 0; k < found.size(); k++) if (boxes.get(k).isChecked()) sel.add(found.get(k));
+                  if (sel.isEmpty()) { U.toast(this, "ما اخترت ولا صورة"); return; }
+                  apply(sel, u);
+                })
+                .setNegativeButton("إلغاء", null).show();
+            }
+            void apply(List<String[]> targets, Uri u) {
+              U.runBg(this, "تغيير الصور", p -> Apk.replace(this, proj, targets, u, p), r -> {
+                @SuppressWarnings("unchecked") List<String> t = (List<String>) r;
+                afterChange(t); U.toast(this, "تغيّرت " + t.size() + " صورة ✏️ بنفس أحجامها الأصلية");
+              });
+            }
+            void afterChange(List<String> names) {
+              Set<String> s = new HashSet<>(names);
+              for (Apk.Img i : all) if (s.contains(i.key())) { i.replaced = proj.repl(i.part, i.name).exists(); cache.remove(i.key()); }
+              filter();
+            }
+            void rebuild() {
+              if (Apk.countRepl(dir) == 0) { U.toast(this, "ما غيرت ولا صورة بعد"); return; }
+              U.runBg(this, "إعادة بناء التطبيق", p -> Apk.rebuild(this, proj, p), r -> {
+                Apk.Result res = (Apk.Result) r;
+                new AlertDialog.Builder(this).setTitle("✅ انبنى التطبيق")
+                  .setMessage("انحفظ بالتنزيلات باسم:\n" + res.fileName + (res.apks.size() > 1 ? "\n(حزمة " + res.apks.size() + " ملفات، ثبّتها من هنا بزر التثبيت)" : "")
+                    + "\n\n⚠️ إذا النسخة الأصلية مثبتة، احذفها أول لأن التوقيع صار مختلف.")
+                  .setPositiveButton("📲 تثبيت", (x, y) -> U.runBg(this, "تجهيز التثبيت", p -> { Apk.install(this, res.apks); return null; }, z -> {}))
+                  .setNegativeButton("تمام", null).show();
+              });
+            }
+            @Override protected void onDestroy() {
+              pool.shutdownNow();
+              if (proj != null) proj.close();
+              super.onDestroy();
+            }
+          }
+          EOF
+          cat > $J/InstallReceiver.java <<'EOF'
+          package com.apkimg.editor;
+          import android.content.*;
+          import android.content.pm.PackageInstaller;
+          import android.widget.Toast;
+
+          public class InstallReceiver extends BroadcastReceiver {
+            @Override public void onReceive(Context c, Intent i) {
+              int st = i.getIntExtra(PackageInstaller.EXTRA_STATUS, -999);
+              if (st == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+                Intent confirm = i.getParcelableExtra(Intent.EXTRA_INTENT);
+                if (confirm != null) { confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); c.startActivity(confirm); }
+                return;
+              }
+              String msg = i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
+              String m = msg == null ? "" : msg;
+              String text;
+              if (st == PackageInstaller.STATUS_SUCCESS) text = "✅ انثبت التطبيق المعدّل";
+              else if (m.contains("UPDATE_INCOMPATIBLE") || m.contains("signatures do not match") || st == PackageInstaller.STATUS_FAILURE_CONFLICT)
+                text = "❌ احذف النسخة الأصلية من الجوال أول، وبعدين ثبّت";
+              else if (st == PackageInstaller.STATUS_FAILURE_ABORTED) text = "انلغى التثبيت";
+              else if (m.contains("NO_MATCHING_ABIS")) text = "❌ ملفات المعالج ناقصة. استورد التطبيق من «التطبيقات المثبتة» أو من ملف APKS كامل";
+              else if (st == PackageInstaller.STATUS_FAILURE_INCOMPATIBLE) text = "❌ غير متوافق: " + m;
+              else text = "❌ فشل التثبيت: " + m;
+              Toast.makeText(c, text, Toast.LENGTH_LONG).show();
+            }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk ApkImageEditor.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ApkImageEditor
+          path: ApkImageEditor.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: محرر صور التطبيقات v${{ github.run_number }}
+          files: ApkImageEditor.apk
+
