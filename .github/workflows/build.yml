@@ -46,8 +46,8 @@ jobs:
               applicationId 'com.apkimg.editor'
               minSdk 29
               targetSdk 34
-              versionCode 3
-              versionName '1.2'
+              versionCode 4
+              versionName '1.3'
             }
             compileOptions {
               sourceCompatibility JavaVersion.VERSION_17
@@ -74,6 +74,7 @@ jobs:
                 </intent-filter>
               </activity>
               <receiver android:name=".InstallReceiver" android:exported="false"/>
+              <activity android:name=".AtlasActivity" android:exported="false"/>
               <activity android:name=".ProjectActivity" android:exported="false" android:windowSoftInputMode="adjustResize"/>
             </application>
           </manifest>
@@ -269,7 +270,7 @@ jobs:
               }
               return out;
             }
-            static int sample(int w, int h, int req) { int s = 1; while (w / (s * 2) >= req && h / (s * 2) >= req) s *= 2; return s; }
+            public static int sample(int w, int h, int req) { int s = 1; while (w / (s * 2) >= req && h / (s * 2) >= req) s *= 2; return s; }
             public static Bitmap decode(Project pr, String part, String name, int req) {
               try {
                 File r = pr.repl(part, name); ZipFile z = pr.zip(part);
@@ -314,7 +315,7 @@ jobs:
               return Bitmap.createScaledBitmap(crop, w, h, true);
             }
             @SuppressWarnings("deprecation")
-            static void encode(Bitmap b, String name, File out) throws IOException {
+            public static void encode(Bitmap b, String name, File out) throws IOException {
               out.getParentFile().mkdirs();
               String l = name.toLowerCase(Locale.ROOT);
               Bitmap.CompressFormat f; int q = 100;
@@ -403,7 +404,7 @@ jobs:
               }
               return new Rect(minX, minY, maxX + 1, maxY + 1);
             }
-            static Bitmap place(Bitmap neu, Bitmap orig) {
+            public static Bitmap place(Bitmap neu, Bitmap orig) {
               int w = orig.getWidth(), h = orig.getHeight();
               Rect box = alphaBox(orig);
               if (box == null) return fit(neu, w, h);            /* صورة كاملة (خلفية): تملي نفس الحجم */
@@ -677,7 +678,7 @@ jobs:
           import java.util.zip.*;
 
           public class ProjectActivity extends Activity {
-            static final int REQ_IMG = 21;
+            static final int REQ_IMG = 21, REQ_ATLAS = 22;
             File dir; Apk.Project proj; List<Apk.Img> all = new ArrayList<>(), shown = new ArrayList<>();
             GridView grid; EditText search; TextView info; Adapter adapter;
             boolean bigFirst = true, onlyEdited = false, allDens = true;
@@ -792,6 +793,13 @@ jobs:
               TextView meta = U.tv(this, img.key(), 12, 0xFF555555); meta.setPadding(0, dp(8), 0, dp(4)); l.addView(meta);
               CheckBox cbAll = new CheckBox(this); cbAll.setText("غيّر كل الصور المشابهة إلها (بكل الأحجام والمجلدات)"); cbAll.setChecked(allDens); l.addView(cbAll);
               l.addView(U.tv(this, "كل صورة تاخذ نفس حجمها ومكانها الأصلي بالضبط.", 12, 0xFF555555));
+              final AlertDialog[] self = new AlertDialog[1];
+              Button atlas = U.btn(this, "🧩 بدّل قطعة وحدة من داخل الصورة", U.CARD2, v -> {
+                if (self[0] != null) self[0].dismiss();
+                startActivityForResult(new Intent(this, AtlasActivity.class).putExtra("dir", dir.getAbsolutePath()).putExtra("part", img.part).putExtra("name", img.name), REQ_ATLAS);
+              });
+              atlas.setTextSize(13); l.addView(atlas);
+              l.addView(U.tv(this, "استعمل هذا للصور الكبيرة اللي بيها قطع هواية (مثل vehicles).", 11, 0xFF777777));
               if (Apk.isNinePatch(img.name)) l.addView(U.tv(this, "⚠️ هاي صورة 9-patch (خلفيات أزرار). تغييرها ممكن يخرّب شكل التطبيق.", 12, 0xFFB45309));
               new Thread(() -> {
                 Bitmap bm = Apk.decode(proj, img.part, img.name, 900); int[] d = Apk.dims(proj, img.part, img.name);
@@ -811,7 +819,7 @@ jobs:
                   return Apk.restoreTargets(proj, targets);
                 }, r -> { @SuppressWarnings("unchecked") List<String> t = (List<String>) r; afterChange(t); U.toast(this, "رجعت الصور الأصلية"); });
               });
-              bd.show();
+              self[0] = bd.show();
             }
             void saveImage(Apk.Img img) {
               U.runBg(this, "حفظ الصورة", p -> {
@@ -823,6 +831,11 @@ jobs:
               }, x -> U.toast(this, "انحفظت بمجلد التنزيلات Download"));
             }
             @Override protected void onActivityResult(int req, int res, Intent data) {
+              if (req == REQ_ATLAS) {
+                for (Apk.Img i : all) { boolean r2 = proj.repl(i.part, i.name).exists(); if (r2 != i.replaced) { i.replaced = r2; cache.remove(i.key()); } }
+                for (Apk.Img i : all) if (i.replaced) cache.remove(i.key());
+                filter(); return;
+              }
               if (req != REQ_IMG || res != RESULT_OK || data == null || data.getData() == null || pendingImg == null) return;
               Uri u = data.getData(); Apk.Img im = pendingImg;
               if (!allDens) { apply(Collections.singletonList(new String[]{ im.part, im.name }), u); return; }
@@ -917,6 +930,275 @@ jobs:
             }
           }
           EOF
+          cat > $J/AtlasActivity.java <<'EOF'
+          package com.apkimg.editor;
+          import android.app.*;
+          import android.content.*;
+          import android.graphics.*;
+          import android.net.Uri;
+          import android.os.*;
+          import android.view.*;
+          import android.widget.*;
+          import java.io.*;
+          import java.util.*;
+          import java.util.zip.*;
+
+          /* يفتح صورة كبيرة بيها قطع هواية (Sprite Sheet)، يلكى كل قطعة وحدها، ويبدّل قطعة بمكانها بالضبط */
+          public class AtlasActivity extends Activity {
+            static final int REQ_PIECE = 31;
+            Apk.Project proj; String part, name;
+            int W, H, S, LW, LH; int[] lab; List<int[]> comps = new ArrayList<>(); /* {left, top, right, bottom, area, id} */
+            AtlasView view; TextView info; ImageView preview; LinearLayout bar; int sel = -1; int rot = 0;
+            int dp(float v) { return U.dp(this, v); }
+
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              getWindow().getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+              part = getIntent().getStringExtra("part"); name = getIntent().getStringExtra("name");
+              LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setBackgroundColor(U.BG);
+              TextView title = U.tv(this, "🧩 " + name.substring(name.lastIndexOf('/') + 1), 17, U.GOLD); title.setPadding(dp(12), dp(12), dp(12), 0); l.addView(title);
+              info = U.tv(this, "جاري تحليل القطع...", 12, U.MUT); info.setPadding(dp(12), dp(2), dp(12), dp(6)); l.addView(info);
+              view = new AtlasView(this); l.addView(view, new LinearLayout.LayoutParams(-1, 0, 1));
+              bar = new LinearLayout(this); bar.setOrientation(LinearLayout.VERTICAL); bar.setPadding(dp(12), dp(8), dp(12), dp(10)); bar.setBackgroundColor(U.CARD);
+              LinearLayout top = new LinearLayout(this); top.setGravity(Gravity.CENTER_VERTICAL);
+              preview = new ImageView(this); preview.setBackgroundColor(0xFF232B47); preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
+              top.addView(preview, new LinearLayout.LayoutParams(dp(90), dp(70)));
+              TextView hint = U.tv(this, "  كبّر بإصبعين، واضغط على القطعة اللي تريد تبدلها.", 13, U.TXT);
+              top.addView(hint, new LinearLayout.LayoutParams(0, -2, 1)); bar.addView(top);
+              LinearLayout btns = new LinearLayout(this);
+              btns.addView(small("🖼 بدّلها", U.GOLD, v -> pickPiece()), new LinearLayout.LayoutParams(0, dp(46), 1));
+              btns.addView(small("⬇ صدّرها", U.CARD2, v -> exportPiece()), new LinearLayout.LayoutParams(0, dp(46), 1));
+              btns.addView(small("↩ رجّعها", U.RED, v -> restorePiece()), new LinearLayout.LayoutParams(0, dp(46), 1));
+              bar.addView(btns); l.addView(bar);
+              setContentView(l);
+              U.runBg(this, "تحليل الصورة", p -> { analyze(p); return null; }, r -> {
+                info.setText(W + "×" + H + " · لكيت " + comps.size() + " قطعة. اضغط على أي قطعة.");
+                view.setBoxes(comps); loadDisplay();
+              });
+            }
+            Button small(String t, int c, View.OnClickListener l) {
+              Button b = U.btn(this, t, c, l); b.setTextSize(13);
+              LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(46), 1); lp.setMargins(dp(3), dp(6), dp(3), 0); b.setLayoutParams(lp); return b;
+            }
+
+            /* ---------- قراءة الصورة ---------- */
+            Bitmap readOriginal() throws Exception {
+              ZipFile z = proj.zip(part);
+              BitmapFactory.Options o = new BitmapFactory.Options(); o.inPreferredConfig = Bitmap.Config.ARGB_8888; o.inScaled = false;
+              try (InputStream in = z.getInputStream(z.getEntry(name))) { return BitmapFactory.decodeStream(in, null, o); }
+            }
+            Bitmap readCurrent() throws Exception {
+              File r = proj.repl(part, name);
+              if (!r.exists()) return readOriginal();
+              BitmapFactory.Options o = new BitmapFactory.Options(); o.inPreferredConfig = Bitmap.Config.ARGB_8888; o.inScaled = false;
+              return BitmapFactory.decodeFile(r.getAbsolutePath(), o);
+            }
+            /* يلكى القطع: كل مجموعة بكسلات غير شفافة متصلة = قطعة */
+            void analyze(U.Progress p) throws Exception {
+              proj = new Apk.Project(new File(getIntent().getStringExtra("dir")));
+              Bitmap o = readOriginal(); if (o == null) throw new Exception("ما كدرت أفتح الصورة");
+              W = o.getWidth(); H = o.getHeight();
+              S = Math.max(1, (int) Math.ceil(Math.max(W, H) / 2048.0));
+              LW = (W + S - 1) / S; LH = (H + S - 1) / S;
+              boolean[] m = new boolean[LW * LH];
+              int[] row = new int[W];
+              p.set("قراءة البكسلات...");
+              for (int y = 0; y < H; y++) {
+                o.getPixels(row, 0, W, 0, y, W, 1);
+                int ly = y / S;
+                for (int x = 0; x < W; x++) if ((row[x] >>> 24) > 8) m[ly * LW + x / S] = true;
+              }
+              o.recycle();
+              lab = new int[LW * LH]; int[] q = new int[LW * LH]; int id = 0;
+              p.set("تحديد القطع...");
+              for (int s = 0; s < m.length; s++) {
+                if (!m[s] || lab[s] != 0) continue;
+                id++; int h = 0, t = 0; q[t++] = s; lab[s] = id;
+                int minX = LW, minY = LH, maxX = -1, maxY = -1, area = 0;
+                while (h < t) {
+                  int c = q[h++]; int cx = c % LW, cy = c / LW; area++;
+                  if (cx < minX) minX = cx; if (cx > maxX) maxX = cx; if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
+                  for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+                    int nx = cx + dx, ny = cy + dy; if (nx < 0 || ny < 0 || nx >= LW || ny >= LH) continue;
+                    int n = ny * LW + nx; if (m[n] && lab[n] == 0) { lab[n] = id; q[t++] = n; }
+                  }
+                }
+                if (area >= 20) comps.add(new int[]{ minX * S, minY * S, Math.min(W, (maxX + 1) * S), Math.min(H, (maxY + 1) * S), area, id });
+              }
+            }
+            int owner(int x, int y) { return lab[(y / S) * LW + (x / S)]; }
+            void loadDisplay() {
+              new Thread(() -> {
+                try {
+                  Bitmap cur = readCurrent();
+                  int max = 2048; Bitmap d = cur;
+                  if (Math.max(cur.getWidth(), cur.getHeight()) > max) {
+                    float f = (float) max / Math.max(cur.getWidth(), cur.getHeight());
+                    d = Bitmap.createScaledBitmap(cur, Math.round(cur.getWidth() * f), Math.round(cur.getHeight() * f), true);
+                  }
+                  final Bitmap fd = d; runOnUiThread(() -> view.setBitmap(fd, W));
+                } catch (Exception e) { runOnUiThread(() -> U.error(this, e)); }
+              }).start();
+            }
+            void select(int fx, int fy) {
+              if (fx < 0 || fy < 0 || fx >= W || fy >= H) return;
+              int own = owner(fx, fy); int best = -1; long bestArea = Long.MAX_VALUE;
+              for (int i = 0; i < comps.size(); i++) {
+                int[] c = comps.get(i);
+                if (own != 0 && c[5] == own) { best = i; break; }
+                if (fx >= c[0] && fx < c[2] && fy >= c[1] && fy < c[3]) { long a = (long) (c[2] - c[0]) * (c[3] - c[1]); if (a < bestArea) { bestArea = a; best = i; } }
+              }
+              sel = best; view.setSelected(best);
+              if (best < 0) { preview.setImageBitmap(null); return; }
+              int[] c = comps.get(best);
+              info.setText("القطعة المختارة: " + (c[2] - c[0]) + "×" + (c[3] - c[1]) + " بكسل");
+              new Thread(() -> { try { Bitmap pc = piece(readCurrent(), best); runOnUiThread(() -> preview.setImageBitmap(pc)); } catch (Exception ignored) {} }).start();
+            }
+            /* يقص القطعة بس (بدون القطع الجيران اللي بنفس المستطيل) */
+            Bitmap piece(Bitmap src, int i) {
+              int[] c = comps.get(i); int w = c[2] - c[0], h = c[3] - c[1];
+              int[] px = new int[w * h]; src.getPixels(px, 0, w, c[0], c[1], w, h);
+              for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) { int o = owner(c[0] + x, c[1] + y); if (o != c[5]) px[y * w + x] = 0; }
+              return Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888);
+            }
+
+            /* ---------- أزرار ---------- */
+            boolean need() { if (sel < 0) { U.toast(this, "اضغط على قطعة أول"); return false; } return true; }
+            void pickPiece() {
+              if (!need()) return;
+              Intent i = new Intent(Intent.ACTION_GET_CONTENT); i.setType("image/*");
+              startActivityForResult(Intent.createChooser(i, "اختار الصورة الجديدة للقطعة"), REQ_PIECE);
+            }
+            @Override protected void onActivityResult(int req, int res, Intent data) {
+              if (req != REQ_PIECE || res != RESULT_OK || data == null || data.getData() == null) return;
+              rot = 0; showPreview(data.getData());
+            }
+            Bitmap loadNew(Uri u) throws Exception {
+              BitmapFactory.Options o = new BitmapFactory.Options(); o.inJustDecodeBounds = true;
+              try (InputStream in = getContentResolver().openInputStream(u)) { BitmapFactory.decodeStream(in, null, o); }
+              BitmapFactory.Options o2 = new BitmapFactory.Options(); o2.inSampleSize = Apk.sample(o.outWidth, o.outHeight, 1024); o2.inPreferredConfig = Bitmap.Config.ARGB_8888;
+              Bitmap b; try (InputStream in = getContentResolver().openInputStream(u)) { b = BitmapFactory.decodeStream(in, null, o2); }
+              if (b == null) throw new Exception("الصورة المختارة ما تنفتح");
+              if (rot != 0) { Matrix m = new Matrix(); m.postRotate(rot); b = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true); }
+              return b;
+            }
+            /* معاينة قبل التطبيق، مع زر تدوير إذا القطعة محطوطة بالعرض */
+            void showPreview(Uri u) {
+              final int idx = sel;
+              U.runBg(this, "تجهيز المعاينة", p -> {
+                Bitmap orig = piece(readOriginal(), idx);
+                return new Bitmap[]{ orig, Apk.place(loadNew(u), orig) };
+              }, r -> {
+                Bitmap[] bs = (Bitmap[]) r;
+                LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.HORIZONTAL); l.setPadding(dp(12), dp(10), dp(12), dp(4));
+                for (int k = 0; k < 2; k++) {
+                  LinearLayout col = new LinearLayout(this); col.setOrientation(LinearLayout.VERTICAL); col.setGravity(Gravity.CENTER_HORIZONTAL);
+                  ImageView iv = new ImageView(this); iv.setImageBitmap(bs[k]); iv.setBackgroundColor(0xFF232B47); iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                  col.addView(iv, new LinearLayout.LayoutParams(-1, dp(130)));
+                  col.addView(U.tv(this, k == 0 ? "الأصلية" : "الجديدة", 12, 0xFF555555));
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1); lp.setMargins(dp(4), 0, dp(4), 0); l.addView(col, lp);
+                }
+                new AlertDialog.Builder(this).setTitle("المعاينة").setView(l)
+                  .setPositiveButton("✓ طبّق", (x, y) -> apply(u, idx))
+                  .setNeutralButton("↻ تدوير 90°", (x, y) -> { rot = (rot + 90) % 360; showPreview(u); })
+                  .setNegativeButton("إلغاء", null).show();
+              });
+            }
+            void apply(Uri u, int idx) {
+              U.runBg(this, "تبديل القطعة", p -> {
+                Bitmap cur = readCurrent().copy(Bitmap.Config.ARGB_8888, true);
+                Bitmap orig = piece(readOriginal(), idx);
+                Bitmap np = Apk.place(loadNew(u), orig);
+                int[] c = comps.get(idx); int w = c[2] - c[0], h = c[3] - c[1];
+                int[] dst = new int[w * h]; cur.getPixels(dst, 0, w, c[0], c[1], w, h);
+                int[] src = new int[w * h]; np.getPixels(src, 0, w, 0, 0, w, h);
+                for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+                  int o = owner(c[0] + x, c[1] + y);
+                  if (o == c[5] || o == 0) dst[y * w + x] = src[y * w + x];
+                }
+                cur.setPixels(dst, 0, w, c[0], c[1], w, h);
+                p.set("حفظ الصورة..."); Apk.encode(cur, name, proj.repl(part, name)); return null;
+              }, r -> { U.toast(this, "✏️ تبدلت القطعة بنفس مكانها وحجمها"); loadDisplay(); select2(idx); setResult(RESULT_OK); });
+            }
+            void select2(int idx) { int[] c = comps.get(idx); select((c[0] + c[2]) / 2, (c[1] + c[3]) / 2); }
+            void restorePiece() {
+              if (!need()) return;
+              final int idx = sel;
+              U.runBg(this, "إرجاع القطعة", p -> {
+                File rf = proj.repl(part, name); if (!rf.exists()) return null;
+                Bitmap cur = readCurrent().copy(Bitmap.Config.ARGB_8888, true), orig = readOriginal();
+                int[] c = comps.get(idx); int w = c[2] - c[0], h = c[3] - c[1];
+                int[] dst = new int[w * h], src = new int[w * h];
+                cur.getPixels(dst, 0, w, c[0], c[1], w, h); orig.getPixels(src, 0, w, c[0], c[1], w, h);
+                for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) { int o = owner(c[0] + x, c[1] + y); if (o == c[5] || o == 0) dst[y * w + x] = src[y * w + x]; }
+                cur.setPixels(dst, 0, w, c[0], c[1], w, h);
+                Apk.encode(cur, name, rf); return null;
+              }, r -> { U.toast(this, "رجعت القطعة الأصلية"); loadDisplay(); select2(idx); setResult(RESULT_OK); });
+            }
+            void exportPiece() {
+              if (!need()) return;
+              final int idx = sel;
+              U.runBg(this, "تصدير القطعة", p -> {
+                Bitmap pc = piece(readCurrent(), idx);
+                File tmp = new File(getCacheDir(), "piece.png");
+                try (OutputStream o = new FileOutputStream(tmp)) { pc.compress(Bitmap.CompressFormat.PNG, 100, o); }
+                String base = name.substring(name.lastIndexOf('/') + 1).replace(".png", "").replace(".jpg", "").replace(".webp", "");
+                return Apk.saveToDownloads(this, tmp, base + "_piece" + (idx + 1) + ".png", "image/png");
+              }, r -> U.toast(this, "انحفظت القطعة بالتنزيلات. عدّلها بأي برنامج صور وارجع بدّلها"));
+            }
+            @Override protected void onDestroy() { if (proj != null) proj.close(); super.onDestroy(); }
+
+            /* ---------- عارض الصورة مع تكبير وتحريك ---------- */
+            class AtlasView extends View {
+              Bitmap bmp; int fullW = 1; final Matrix m = new Matrix(); List<int[]> boxes = new ArrayList<>(); int selected = -1; boolean fitted = false;
+              final Paint box = new Paint(), selP = new Paint(), bmpP = new Paint(Paint.FILTER_BITMAP_FLAG);
+              final ScaleGestureDetector sg; final GestureDetector gd;
+              AtlasView(Context c) {
+                super(c);
+                setBackgroundColor(0xFF1A2038);
+                box.setStyle(Paint.Style.STROKE); box.setColor(0x6638BDF8);
+                selP.setStyle(Paint.Style.STROKE); selP.setColor(0xFF22C55E);
+                sg = new ScaleGestureDetector(c, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                  @Override public boolean onScale(ScaleGestureDetector d) { m.postScale(d.getScaleFactor(), d.getScaleFactor(), d.getFocusX(), d.getFocusY()); invalidate(); return true; }
+                });
+                gd = new GestureDetector(c, new GestureDetector.SimpleOnGestureListener() {
+                  @Override public boolean onDown(MotionEvent e) { return true; }
+                  @Override public boolean onScroll(MotionEvent a, MotionEvent b, float dx, float dy) { m.postTranslate(-dx, -dy); invalidate(); return true; }
+                  @Override public boolean onSingleTapUp(MotionEvent e) {
+                    if (bmp == null) return true;
+                    Matrix inv = new Matrix(); m.invert(inv); float[] pt = { e.getX(), e.getY() }; inv.mapPoints(pt);
+                    float k = (float) fullW / bmp.getWidth();
+                    select((int) (pt[0] * k), (int) (pt[1] * k)); return true;
+                  }
+                  @Override public boolean onDoubleTap(MotionEvent e) { m.postScale(2f, 2f, e.getX(), e.getY()); invalidate(); return true; }
+                });
+              }
+              void setBitmap(Bitmap b, int fw) { bmp = b; fullW = fw; if (!fitted) fit(); invalidate(); }
+              void setBoxes(List<int[]> b) { boxes = b; invalidate(); }
+              void setSelected(int i) { selected = i; invalidate(); }
+              void fit() {
+                if (bmp == null || getWidth() == 0) return;
+                float s = Math.min((float) getWidth() / bmp.getWidth(), (float) getHeight() / bmp.getHeight());
+                m.reset(); m.postScale(s, s); m.postTranslate((getWidth() - bmp.getWidth() * s) / 2, (getHeight() - bmp.getHeight() * s) / 2); fitted = true;
+              }
+              @Override protected void onSizeChanged(int w, int h, int ow, int oh) { if (!fitted) fit(); }
+              @Override public boolean onTouchEvent(MotionEvent e) { sg.onTouchEvent(e); if (!sg.isInProgress()) gd.onTouchEvent(e); return true; }
+              @Override protected void onDraw(Canvas cv) {
+                if (bmp == null) return;
+                cv.save(); cv.concat(m);
+                cv.drawBitmap(bmp, 0, 0, bmpP);
+                float k = (float) bmp.getWidth() / fullW;
+                float[] v = new float[9]; m.getValues(v); float sc = v[Matrix.MSCALE_X];
+                box.setStrokeWidth(1.2f / sc); selP.setStrokeWidth(3f / sc);
+                for (int i = 0; i < boxes.size(); i++) {
+                  int[] c = boxes.get(i);
+                  cv.drawRect(c[0] * k, c[1] * k, c[2] * k, c[3] * k, i == selected ? selP : box);
+                }
+                cv.restore();
+              }
+            }
+          }
+          EOF
 
       - name: Build APK
         run: gradle :app:assembleDebug --no-daemon
@@ -935,4 +1217,3 @@ jobs:
           tag_name: v${{ github.run_number }}
           name: محرر صور التطبيقات v${{ github.run_number }}
           files: ApkImageEditor.apk
-
