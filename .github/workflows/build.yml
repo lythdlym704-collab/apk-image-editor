@@ -1052,7 +1052,8 @@ jobs:
               if (best < 0) { preview.setImageBitmap(null); return; }
               int[] c = comps.get(best);
               info.setText("القطعة المختارة: " + (c[2] - c[0]) + "×" + (c[3] - c[1]) + " بكسل");
-              new Thread(() -> { try { Bitmap pc = piece(readCurrent(), best); runOnUiThread(() -> preview.setImageBitmap(pc)); } catch (Exception ignored) {} }).start();
+              final int chosen = best;
+              new Thread(() -> { try { Bitmap pc = piece(readCurrent(), chosen); runOnUiThread(() -> { if (sel == chosen) preview.setImageBitmap(pc); }); } catch (Exception ignored) {} }).start();
             }
             /* يقص القطعة بس (بدون القطع الجيران اللي بنفس المستطيل) */
             Bitmap piece(Bitmap src, int i) {
@@ -1217,3 +1218,4 @@ jobs:
           tag_name: v${{ github.run_number }}
           name: محرر صور التطبيقات v${{ github.run_number }}
           files: ApkImageEditor.apk
+
