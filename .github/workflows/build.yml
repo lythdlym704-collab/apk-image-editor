@@ -1,0 +1,668 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Generate Android project
+        run: |
+          P=app/src/main
+          J=$P/java/com/apkimg/editor
+          rm -rf app
+          mkdir -p $J $P/assets
+          keytool -J-Dkeystore.pkcs12.legacy -genkeypair -keystore $P/assets/sign.p12 -storetype PKCS12 -alias mod \
+            -keyalg RSA -keysize 2048 -validity 10000 -storepass apkimg123 -keypass apkimg123 -dname "CN=APK Image Editor"
+          cat > settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "ApkImageEditor"
+          include ':app'
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          EOF
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+            namespace 'com.apkimg.editor'
+            compileSdk 34
+            defaultConfig {
+              applicationId 'com.apkimg.editor'
+              minSdk 29
+              targetSdk 34
+              versionCode 1
+              versionName '1.0'
+            }
+            compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+            }
+            packaging { resources { excludes += ['META-INF/*.kotlin_module', 'META-INF/versions/**'] } }
+          }
+          dependencies {
+            implementation 'com.android.tools.build:apksig:8.5.2'
+          }
+          EOF
+          cat > $P/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+            <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>
+            <application android:label="محرر صور التطبيقات" android:icon="@android:drawable/ic_menu_gallery"
+                android:theme="@android:style/Theme.Material.NoActionBar" android:supportsRtl="true"
+                android:largeHeap="true">
+              <activity android:name=".MainActivity" android:exported="true">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+              <activity android:name=".ProjectActivity" android:exported="false" android:windowSoftInputMode="adjustResize"/>
+            </application>
+          </manifest>
+          EOF
+          cat > $J/U.java <<'EOF'
+          package com.apkimg.editor;
+          import android.app.*;
+          import android.content.Context;
+          import android.graphics.drawable.GradientDrawable;
+          import android.view.*;
+          import android.widget.*;
+
+          public class U {
+            public static final int BG = 0xFF0B1020, CARD = 0xFF141A2E, CARD2 = 0xFF1B2340, GOLD = 0xFFE9C46A, TXT = 0xFFEEF1F8, MUT = 0xFF8B93AD, RED = 0xFF4C1414, GRN = 0xFF14532D;
+            public interface Progress { void set(String msg); }
+            public interface Task { Object run(Progress p) throws Exception; }
+            public interface Done { void ok(Object r); }
+
+            public static int dp(Context c, float v) { return (int) (v * c.getResources().getDisplayMetrics().density); }
+            public static GradientDrawable bg(Context c, int color, float r) {
+              GradientDrawable g = new GradientDrawable(); g.setColor(color); g.setCornerRadius(dp(c, r)); return g;
+            }
+            public static TextView tv(Context c, String t, float size, int color) {
+              TextView v = new TextView(c); v.setText(t); v.setTextSize(size); v.setTextColor(color); return v;
+            }
+            public static Button btn(Context c, String t, int color, View.OnClickListener l) {
+              Button b = new Button(c); b.setText(t); b.setAllCaps(false); b.setTextSize(15);
+              b.setTextColor(color == GOLD ? 0xFF1A1300 : TXT); b.setBackground(bg(c, color, 14));
+              LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(c, 52)); lp.setMargins(0, dp(c, 6), 0, 0);
+              b.setLayoutParams(lp); b.setOnClickListener(l); return b;
+            }
+            public static void toast(Context c, String t) { Toast.makeText(c, t, Toast.LENGTH_LONG).show(); }
+            public static void error(Activity a, Throwable e) {
+              new AlertDialog.Builder(a).setTitle("صار خطأ").setMessage(String.valueOf(e.getMessage() != null ? e.getMessage() : e)).setPositiveButton("تمام", null).show();
+            }
+            /* يشغّل شغلة طويلة بالخلفية مع نافذة انتظار */
+            public static void runBg(Activity a, String title, Task t, Done d) {
+              LinearLayout l = new LinearLayout(a); l.setOrientation(LinearLayout.VERTICAL); l.setPadding(dp(a, 24), dp(a, 20), dp(a, 24), dp(a, 12));
+              ProgressBar pb = new ProgressBar(a); l.addView(pb);
+              TextView msg = tv(a, "...", 14, 0xFF333333); msg.setGravity(Gravity.CENTER); msg.setPadding(0, dp(a, 10), 0, 0); l.addView(msg);
+              AlertDialog dlg = new AlertDialog.Builder(a).setTitle(title).setView(l).setCancelable(false).show();
+              new Thread(() -> {
+                Object r = null; Throwable err = null;
+                try { r = t.run(m -> a.runOnUiThread(() -> msg.setText(m))); } catch (Throwable e) { err = e; }
+                final Object rr = r; final Throwable ee = err;
+                a.runOnUiThread(() -> {
+                  try { dlg.dismiss(); } catch (Exception ignored) {}
+                  if (ee != null) error(a, ee); else if (d != null) d.ok(rr);
+                });
+              }).start();
+            }
+          }
+          EOF
+          cat > $J/Apk.java <<'EOF'
+          package com.apkimg.editor;
+          import android.content.*;
+          import android.content.pm.*;
+          import android.graphics.*;
+          import android.graphics.drawable.Drawable;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Environment;
+          import android.provider.MediaStore;
+          import com.android.apksig.ApkSigner;
+          import java.io.*;
+          import java.security.KeyStore;
+          import java.security.PrivateKey;
+          import java.security.cert.X509Certificate;
+          import java.util.*;
+          import java.util.zip.*;
+
+          public class Apk {
+            public static class Img { public String name; public long size; public boolean replaced; }
+
+            public static File root(Context c) { File f = new File(c.getFilesDir(), "projects"); f.mkdirs(); return f; }
+            public static File base(File dir) { return new File(dir, "base.apk"); }
+            public static File replDir(File dir) { return new File(dir, "repl"); }
+            public static File repl(File dir, String name) { return new File(replDir(dir), name); }
+            public static String readName(File dir) {
+              try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(new File(dir, "name.txt")), "UTF-8"))) { return r.readLine(); }
+              catch (Exception e) { return dir.getName(); }
+            }
+            public static void writeName(File dir, String n) throws IOException {
+              try (OutputStream o = new FileOutputStream(new File(dir, "name.txt"))) { o.write(n.getBytes("UTF-8")); }
+            }
+            public static PackageInfo info(Context c, File apk) {
+              PackageInfo pi = c.getPackageManager().getPackageArchiveInfo(apk.getAbsolutePath(), 0);
+              if (pi != null && pi.applicationInfo != null) { pi.applicationInfo.sourceDir = apk.getAbsolutePath(); pi.applicationInfo.publicSourceDir = apk.getAbsolutePath(); }
+              return pi;
+            }
+            public static Drawable icon(Context c, File apk) {
+              try { PackageInfo pi = info(c, apk); return pi == null ? null : pi.applicationInfo.loadIcon(c.getPackageManager()); } catch (Exception e) { return null; }
+            }
+            public static void copy(InputStream in, OutputStream out) throws IOException {
+              byte[] b = new byte[65536]; int n; while ((n = in.read(b)) > 0) out.write(b, 0, n);
+            }
+            public static int countRepl(File dir) { return countFiles(replDir(dir)); }
+            static int countFiles(File f) {
+              if (!f.exists()) return 0; if (f.isFile()) return 1;
+              int n = 0; File[] k = f.listFiles(); if (k != null) for (File x : k) n += countFiles(x); return n;
+            }
+            public static void deleteRec(File f) {
+              if (f.isDirectory()) { File[] k = f.listFiles(); if (k != null) for (File x : k) deleteRec(x); }
+              f.delete();
+            }
+
+            /* ---------- استيراد ---------- */
+            public static File importStream(Context c, InputStream in, String fallbackName, U.Progress p) throws Exception {
+              File dir = new File(root(c), String.valueOf(System.currentTimeMillis())); dir.mkdirs();
+              File b = base(dir);
+              p.set("جاري نسخ الملف...");
+              try (InputStream i = in; OutputStream o = new FileOutputStream(b)) {
+                byte[] buf = new byte[65536]; int n; long tot = 0, last = 0;
+                while ((n = i.read(buf)) > 0) { o.write(buf, 0, n); tot += n; if (tot - last > 2_000_000) { last = tot; p.set("انسخ " + (tot / 1_000_000) + " MB"); } }
+              }
+              try (ZipFile z = new ZipFile(b)) {
+                if (z.getEntry("AndroidManifest.xml") == null) throw new Exception("هذا الملف مو APK صالح");
+              } catch (ZipException e) { deleteRec(dir); throw new Exception("هذا الملف مو APK صالح"); }
+              String name = fallbackName;
+              try { PackageInfo pi = info(c, b); if (pi != null) name = c.getPackageManager().getApplicationLabel(pi.applicationInfo).toString(); } catch (Exception ignored) {}
+              writeName(dir, name == null ? "تطبيق" : name);
+              return dir;
+            }
+
+            /* ---------- الصور ---------- */
+            public static boolean isImage(String n) {
+              String l = n.toLowerCase(Locale.ROOT);
+              return l.endsWith(".png") || l.endsWith(".jpg") || l.endsWith(".jpeg") || l.endsWith(".webp");
+            }
+            public static boolean isNinePatch(String n) { return n.toLowerCase(Locale.ROOT).endsWith(".9.png"); }
+            public static List<Img> list(File dir, ZipFile z) {
+              List<Img> out = new ArrayList<>(); Set<String> seen = new HashSet<>();
+              Enumeration<? extends ZipEntry> en = z.entries();
+              while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                if (e.isDirectory() || !isImage(e.getName()) || !seen.add(e.getName())) continue;
+                Img i = new Img(); i.name = e.getName(); i.size = e.getSize(); i.replaced = repl(dir, i.name).exists(); out.add(i);
+              }
+              return out;
+            }
+            static int sample(int w, int h, int req) { int s = 1; while (w / (s * 2) >= req && h / (s * 2) >= req) s *= 2; return s; }
+            public static Bitmap decode(File dir, ZipFile z, String name, int req) {
+              try {
+                File r = repl(dir, name);
+                BitmapFactory.Options o = new BitmapFactory.Options(); o.inJustDecodeBounds = true;
+                if (r.exists()) BitmapFactory.decodeFile(r.getAbsolutePath(), o);
+                else try (InputStream in = z.getInputStream(z.getEntry(name))) { BitmapFactory.decodeStream(in, null, o); }
+                if (o.outWidth <= 0) return null;
+                BitmapFactory.Options o2 = new BitmapFactory.Options(); o2.inSampleSize = sample(o.outWidth, o.outHeight, req);
+                if (r.exists()) return BitmapFactory.decodeFile(r.getAbsolutePath(), o2);
+                try (InputStream in = z.getInputStream(z.getEntry(name))) { return BitmapFactory.decodeStream(in, null, o2); }
+              } catch (Exception e) { return null; }
+            }
+            public static int[] dims(ZipFile z, String name) {
+              try (InputStream in = z.getInputStream(z.getEntry(name))) {
+                BitmapFactory.Options o = new BitmapFactory.Options(); o.inJustDecodeBounds = true;
+                BitmapFactory.decodeStream(in, null, o); return new int[]{ o.outWidth, o.outHeight };
+              } catch (Exception e) { return new int[]{ 0, 0 }; }
+            }
+            /* نفس الصورة بمقاسات (كثافات) ثانية: res/drawable-hdpi/x.png و res/drawable-xxhdpi/x.png ... */
+            public static List<String> variants(ZipFile z, String name, boolean all) {
+              List<String> out = new ArrayList<>(); out.add(name);
+              if (!all || !name.startsWith("res/")) return out;
+              String file = name.substring(name.lastIndexOf('/') + 1);
+              String folder = name.substring(4, name.lastIndexOf('/'));
+              String kind = folder.contains("-") ? folder.substring(0, folder.indexOf('-')) : folder;
+              Enumeration<? extends ZipEntry> en = z.entries();
+              while (en.hasMoreElements()) {
+                String n = en.nextElement().getName();
+                if (n.equals(name) || !n.startsWith("res/" + kind) || !n.endsWith("/" + file)) continue;
+                String f2 = n.substring(4, n.lastIndexOf('/'));
+                if (f2.equals(kind) || f2.startsWith(kind + "-")) out.add(n);
+              }
+              return out;
+            }
+            static Bitmap fit(Bitmap src, int w, int h) {
+              float s = Math.max((float) w / src.getWidth(), (float) h / src.getHeight());
+              int sw = Math.round(w / s), sh = Math.round(h / s);
+              int x = Math.max(0, (src.getWidth() - sw) / 2), y = Math.max(0, (src.getHeight() - sh) / 2);
+              Bitmap crop = Bitmap.createBitmap(src, x, y, Math.min(sw, src.getWidth() - x), Math.min(sh, src.getHeight() - y));
+              return Bitmap.createScaledBitmap(crop, w, h, true);
+            }
+            @SuppressWarnings("deprecation")
+            static void encode(Bitmap b, String name, File out) throws IOException {
+              out.getParentFile().mkdirs();
+              String l = name.toLowerCase(Locale.ROOT);
+              Bitmap.CompressFormat f; int q = 100;
+              if (l.endsWith(".jpg") || l.endsWith(".jpeg")) { f = Bitmap.CompressFormat.JPEG; q = 92; }
+              else if (l.endsWith(".webp")) { if (Build.VERSION.SDK_INT >= 30) f = Bitmap.CompressFormat.WEBP_LOSSY; else f = Bitmap.CompressFormat.WEBP; q = 90; }
+              else f = Bitmap.CompressFormat.PNG;
+              try (OutputStream o = new FileOutputStream(out)) { if (!b.compress(f, q, o)) throw new IOException("ما كدرت أحفظ الصورة"); }
+            }
+            public static List<String> replace(Context c, File dir, ZipFile z, String name, Uri src, boolean all, boolean keepSize) throws Exception {
+              BitmapFactory.Options o = new BitmapFactory.Options(); o.inJustDecodeBounds = true;
+              try (InputStream in = c.getContentResolver().openInputStream(src)) { BitmapFactory.decodeStream(in, null, o); }
+              if (o.outWidth <= 0) throw new Exception("الصورة المختارة ما تنفتح");
+              BitmapFactory.Options o2 = new BitmapFactory.Options(); o2.inSampleSize = sample(o.outWidth, o.outHeight, 2048);
+              Bitmap img;
+              try (InputStream in = c.getContentResolver().openInputStream(src)) { img = BitmapFactory.decodeStream(in, null, o2); }
+              if (img == null) throw new Exception("الصورة المختارة ما تنفتح");
+              List<String> targets = variants(z, name, all);
+              for (String t : targets) {
+                Bitmap outB = img;
+                if (keepSize) { int[] d = dims(z, t); if (d[0] > 0 && d[1] > 0) outB = fit(img, d[0], d[1]); }
+                encode(outB, t, repl(dir, t));
+              }
+              return targets;
+            }
+            public static List<String> restore(File dir, ZipFile z, String name, boolean all) {
+              List<String> t = variants(z, name, all);
+              for (String n : t) repl(dir, n).delete();
+              return t;
+            }
+
+            /* ---------- إعادة البناء والتوقيع ---------- */
+            static boolean isSignatureFile(String n) {
+              if (n.equals("stamp-cert-sha256")) return true;
+              if (!n.startsWith("META-INF/")) return false;
+              String u = n.toUpperCase(Locale.ROOT);
+              return u.equals("META-INF/MANIFEST.MF") || u.endsWith(".SF") || u.endsWith(".RSA") || u.endsWith(".DSA") || u.endsWith(".EC");
+            }
+            public static Uri rebuild(Context c, File dir, U.Progress p) throws Exception {
+              File unsigned = new File(c.getCacheDir(), "unsigned.apk"), signed = new File(c.getCacheDir(), "signed.apk");
+              unsigned.delete(); signed.delete();
+              try (ZipFile z = new ZipFile(base(dir)); ZipOutputStream zo = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(unsigned), 1 << 16))) {
+                List<? extends ZipEntry> all = Collections.list(z.entries());
+                Set<String> seen = new HashSet<>(); int i = 0;
+                for (ZipEntry e : all) {
+                  i++; if (i % 50 == 0) p.set("جاري البناء " + i + " / " + all.size());
+                  String n = e.getName();
+                  if (e.isDirectory() || isSignatureFile(n) || !seen.add(n)) continue;
+                  File r = repl(dir, n);
+                  ZipEntry ne = new ZipEntry(n);
+                  if (e.getTime() > 0) ne.setTime(e.getTime());
+                  if (e.getMethod() == ZipEntry.STORED) {
+                    ne.setMethod(ZipEntry.STORED);
+                    if (r.exists()) {
+                      CRC32 crc = new CRC32();
+                      try (InputStream in = new FileInputStream(r)) { byte[] b = new byte[65536]; int k; while ((k = in.read(b)) > 0) crc.update(b, 0, k); }
+                      ne.setSize(r.length()); ne.setCompressedSize(r.length()); ne.setCrc(crc.getValue());
+                    } else { ne.setSize(e.getSize()); ne.setCompressedSize(e.getSize()); ne.setCrc(e.getCrc()); }
+                  } else ne.setMethod(ZipEntry.DEFLATED);
+                  zo.putNextEntry(ne);
+                  try (InputStream in = r.exists() ? new FileInputStream(r) : z.getInputStream(e)) { copy(in, zo); }
+                  zo.closeEntry();
+                }
+              }
+              p.set("جاري التوقيع...");
+              char[] pass = "apkimg123".toCharArray();
+              KeyStore ks = KeyStore.getInstance("PKCS12");
+              try (InputStream in = c.getAssets().open("sign.p12")) { ks.load(in, pass); }
+              PrivateKey pk = (PrivateKey) ks.getKey("mod", pass);
+              X509Certificate cert = (X509Certificate) ks.getCertificate("mod");
+              ApkSigner.SignerConfig sc = new ApkSigner.SignerConfig.Builder("MOD", pk, Collections.singletonList(cert)).build();
+              new ApkSigner.Builder(Collections.singletonList(sc))
+                .setInputApk(unsigned).setOutputApk(signed)
+                .setV1SigningEnabled(true).setV2SigningEnabled(true).setV3SigningEnabled(false)
+                .build().sign();
+              unsigned.delete();
+              p.set("جاري الحفظ بالتنزيلات...");
+              String fname = readName(dir).replaceAll("[\\\\/:*?\"<>|]", "_") + "_mod_" + (System.currentTimeMillis() / 1000 % 100000) + ".apk";
+              Uri u = saveToDownloads(c, signed, fname, "application/vnd.android.package-archive");
+              signed.delete();
+              return u;
+            }
+            public static Uri saveToDownloads(Context c, File f, String name, String mime) throws Exception {
+              try (InputStream in = new FileInputStream(f)) { return saveToDownloads(c, in, name, mime); }
+            }
+            public static Uri saveToDownloads(Context c, InputStream in, String name, String mime) throws Exception {
+              ContentValues v = new ContentValues();
+              v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+              v.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+              v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+              Uri u = c.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+              if (u == null) throw new Exception("ما كدرت أكتب بمجلد التنزيلات");
+              try (OutputStream o = c.getContentResolver().openOutputStream(u)) { copy(in, o); }
+              return u;
+            }
+          }
+          EOF
+          cat > $J/MainActivity.java <<'EOF'
+          package com.apkimg.editor;
+          import android.app.*;
+          import android.content.*;
+          import android.content.pm.*;
+          import android.graphics.drawable.Drawable;
+          import android.net.Uri;
+          import android.os.*;
+          import android.view.*;
+          import android.widget.*;
+          import java.io.*;
+          import java.util.*;
+
+          public class MainActivity extends Activity {
+            static final int REQ_FILE = 11;
+            LinearLayout list; TextView empty;
+            int dp(float v) { return U.dp(this, v); }
+
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              getWindow().getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+              FrameLayout root = new FrameLayout(this); root.setBackgroundColor(U.BG);
+              ScrollView sv = new ScrollView(this);
+              LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setPadding(dp(16), dp(22), dp(16), dp(100));
+              sv.addView(l); root.addView(sv);
+              l.addView(U.tv(this, "محرر صور التطبيقات 🖼", 24, U.GOLD));
+              TextView sub = U.tv(this, "ضيف تطبيق APK، غيّر صوره، وابنيه من جديد", 13, U.MUT); sub.setPadding(0, dp(4), 0, dp(14)); l.addView(sub);
+              list = new LinearLayout(this); list.setOrientation(LinearLayout.VERTICAL); l.addView(list);
+              empty = U.tv(this, "ما فيه تطبيقات بعد.\nاضغط ＋ تحت حتى تضيف تطبيقك.", 15, U.MUT);
+              empty.setGravity(Gravity.CENTER); empty.setPadding(0, dp(60), 0, 0); l.addView(empty);
+
+              TextView fab = U.tv(this, "＋", 30, 0xFF1A1300); fab.setGravity(Gravity.CENTER);
+              android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+              g.setShape(android.graphics.drawable.GradientDrawable.OVAL); g.setColor(U.GOLD); fab.setBackground(g); fab.setElevation(dp(6));
+              FrameLayout.LayoutParams fp = new FrameLayout.LayoutParams(dp(64), dp(64), Gravity.BOTTOM | Gravity.START);
+              fp.setMargins(dp(20), 0, dp(20), dp(24)); root.addView(fab, fp);
+              fab.setOnClickListener(v -> addMenu());
+              setContentView(root);
+            }
+            @Override protected void onResume() { super.onResume(); refresh(); }
+
+            void refresh() {
+              list.removeAllViews();
+              File[] dirs = Apk.root(this).listFiles();
+              List<File> ds = new ArrayList<>(); if (dirs != null) for (File d : dirs) if (Apk.base(d).exists()) ds.add(d);
+              Collections.sort(ds, (a, c) -> c.getName().compareTo(a.getName()));
+              empty.setVisibility(ds.isEmpty() ? View.VISIBLE : View.GONE);
+              for (File d : ds) {
+                LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setPadding(dp(12), dp(12), dp(12), dp(12)); row.setBackground(U.bg(this, U.CARD, 16));
+                LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, -2); rp.setMargins(0, 0, 0, dp(10)); row.setLayoutParams(rp);
+                ImageView ic = new ImageView(this); row.addView(ic, new LinearLayout.LayoutParams(dp(48), dp(48)));
+                LinearLayout t = new LinearLayout(this); t.setOrientation(LinearLayout.VERTICAL); t.setPadding(dp(12), 0, dp(12), 0);
+                t.addView(U.tv(this, Apk.readName(d), 17, U.TXT));
+                int n = Apk.countRepl(d);
+                t.addView(U.tv(this, (Apk.base(d).length() / 1_000_000) + " MB" + (n > 0 ? " · " + n + " صورة معدّلة ✏️" : ""), 12, U.MUT));
+                row.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+                row.setOnClickListener(v -> startActivity(new Intent(this, ProjectActivity.class).putExtra("dir", d.getAbsolutePath())));
+                row.setOnLongClickListener(v -> { askDelete(d); return true; });
+                list.addView(row);
+                new Thread(() -> { Drawable dr = Apk.icon(this, Apk.base(d)); if (dr != null) runOnUiThread(() -> ic.setImageDrawable(dr)); }).start();
+              }
+            }
+            void askDelete(File d) {
+              new AlertDialog.Builder(this).setTitle("حذف " + Apk.readName(d) + "؟")
+                .setMessage("يمسح المشروع والصور اللي غيرتها من داخل المحرر (ملفات التنزيلات ما تنمسح).")
+                .setPositiveButton("حذف", (x, y) -> { Apk.deleteRec(d); refresh(); }).setNegativeButton("لا", null).show();
+            }
+            void addMenu() {
+              new AlertDialog.Builder(this).setTitle("أضف تطبيقك")
+                .setItems(new String[]{ "📁 من ملف APK", "📱 من التطبيقات المثبتة بالجوال" }, (x, w) -> { if (w == 0) pickFile(); else pickInstalled(); })
+                .show();
+            }
+            void pickFile() {
+              Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT); i.addCategory(Intent.CATEGORY_OPENABLE); i.setType("*/*");
+              i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{ "application/vnd.android.package-archive", "application/octet-stream", "application/zip" });
+              try { startActivityForResult(i, REQ_FILE); } catch (Exception e) { U.toast(this, "ما فيه مدير ملفات"); }
+            }
+            @Override protected void onActivityResult(int req, int res, Intent data) {
+              if (req != REQ_FILE || res != RESULT_OK || data == null || data.getData() == null) return;
+              Uri u = data.getData();
+              U.runBg(this, "استيراد التطبيق", p -> Apk.importStream(this, getContentResolver().openInputStream(u), "تطبيق", p), r -> open((File) r));
+            }
+            void pickInstalled() {
+              PackageManager pm = getPackageManager();
+              List<ApplicationInfo> apps = new ArrayList<>();
+              for (ApplicationInfo a : pm.getInstalledApplications(0))
+                if ((a.flags & ApplicationInfo.FLAG_SYSTEM) == 0 && !a.packageName.equals(getPackageName())) apps.add(a);
+              Collections.sort(apps, (a, c) -> pm.getApplicationLabel(a).toString().compareToIgnoreCase(pm.getApplicationLabel(c).toString()));
+              String[] names = new String[apps.size()];
+              for (int k = 0; k < names.length; k++) names[k] = pm.getApplicationLabel(apps.get(k)).toString();
+              new AlertDialog.Builder(this).setTitle("اختار التطبيق").setItems(names, (x, w) -> {
+                ApplicationInfo a = apps.get(w); String label = names[w];
+                Runnable go = () -> U.runBg(this, "استيراد " + label, p -> Apk.importStream(this, new FileInputStream(a.sourceDir), label, p), r -> open((File) r));
+                if (a.splitSourceDirs != null && a.splitSourceDirs.length > 0)
+                  new AlertDialog.Builder(this).setTitle("تنبيه")
+                    .setMessage("هذا التطبيق مقسّم لعدة ملفات (Split APK). أكدر أطلّع الصور الأساسية منه، بس النسخة المعدّلة ممكن ما تتثبت لوحدها. الأحسن تستعمل ملف APK كامل.")
+                    .setPositiveButton("كمّل", (q, z) -> go.run()).setNegativeButton("إلغاء", null).show();
+                else go.run();
+              }).show();
+            }
+            void open(File dir) { startActivity(new Intent(this, ProjectActivity.class).putExtra("dir", dir.getAbsolutePath())); }
+          }
+          EOF
+          cat > $J/ProjectActivity.java <<'EOF'
+          package com.apkimg.editor;
+          import android.app.*;
+          import android.content.*;
+          import android.graphics.*;
+          import android.net.Uri;
+          import android.os.*;
+          import android.text.*;
+          import android.util.LruCache;
+          import android.view.*;
+          import android.widget.*;
+          import java.io.*;
+          import java.util.*;
+          import java.util.concurrent.*;
+          import java.util.zip.*;
+
+          public class ProjectActivity extends Activity {
+            static final int REQ_IMG = 21;
+            File dir; ZipFile zip; List<Apk.Img> all = new ArrayList<>(), shown = new ArrayList<>();
+            GridView grid; EditText search; TextView info; Adapter adapter;
+            boolean bigFirst = true, onlyEdited = false, allDens = true, keepSize = true;
+            String pendingName;
+            final ExecutorService pool = Executors.newFixedThreadPool(3);
+            final LruCache<String, Bitmap> cache = new LruCache<String, Bitmap>(24 * 1024 * 1024) {
+              @Override protected int sizeOf(String k, Bitmap b) { return b.getByteCount(); }
+            };
+            int dp(float v) { return U.dp(this, v); }
+
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              getWindow().getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+              dir = new File(getIntent().getStringExtra("dir"));
+              LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setBackgroundColor(U.BG);
+              l.setPadding(dp(12), dp(16), dp(12), dp(10));
+              l.addView(U.tv(this, Apk.readName(dir), 21, U.GOLD));
+              info = U.tv(this, "جاري قراءة الصور...", 12, U.MUT); info.setPadding(0, dp(2), 0, dp(8)); l.addView(info);
+              search = new EditText(this); search.setHint("🔍 ابحث عن صورة (مثلاً car أو bg)"); search.setSingleLine(true);
+              search.setTextColor(U.TXT); search.setHintTextColor(U.MUT); search.setBackground(U.bg(this, U.CARD2, 12)); search.setPadding(dp(12), dp(10), dp(12), dp(10));
+              search.addTextChangedListener(new TextWatcher() {
+                public void beforeTextChanged(CharSequence s, int a, int c, int d) {}
+                public void onTextChanged(CharSequence s, int a, int c, int d) {}
+                public void afterTextChanged(Editable s) { filter(); }
+              });
+              l.addView(search);
+              LinearLayout chips = new LinearLayout(this); chips.setPadding(0, dp(6), 0, dp(6));
+              chips.addView(chip("الأكبر أولاً", true, v -> { bigFirst = v; filter(); }));
+              chips.addView(chip("المعدّلة بس", false, v -> { onlyEdited = v; filter(); }));
+              l.addView(chips);
+              grid = new GridView(this); grid.setNumColumns(3); grid.setHorizontalSpacing(dp(6)); grid.setVerticalSpacing(dp(6));
+              adapter = new Adapter(); grid.setAdapter(adapter);
+              grid.setOnItemClickListener((p, v, pos, id) -> details(shown.get(pos)));
+              l.addView(grid, new LinearLayout.LayoutParams(-1, 0, 1));
+              l.addView(U.btn(this, "🔨 إعادة البناء والتصدير للتنزيلات", U.GOLD, v -> rebuild()));
+              setContentView(l);
+              U.runBg(this, "فتح التطبيق", p -> { zip = new ZipFile(Apk.base(dir)); return Apk.list(dir, zip); }, r -> {
+                @SuppressWarnings("unchecked") List<Apk.Img> imgs = (List<Apk.Img>) r; all = imgs; filter();
+              });
+            }
+            interface Toggle { void on(boolean v); }
+            TextView chip(String t, boolean init, Toggle cb) {
+              TextView c = U.tv(this, t, 13, U.TXT); c.setPadding(dp(12), dp(7), dp(12), dp(7));
+              final boolean[] st = { init };
+              Runnable paint = () -> { c.setBackground(U.bg(this, st[0] ? U.GOLD : U.CARD2, 20)); c.setTextColor(st[0] ? 0xFF1A1300 : U.TXT); };
+              paint.run();
+              c.setOnClickListener(v -> { st[0] = !st[0]; paint.run(); cb.on(st[0]); });
+              LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2); lp.setMargins(0, 0, dp(6), 0); c.setLayoutParams(lp);
+              return c;
+            }
+            void filter() {
+              String q = search.getText().toString().trim().toLowerCase(Locale.ROOT);
+              shown = new ArrayList<>(); int edited = 0;
+              for (Apk.Img i : all) {
+                if (i.replaced) edited++;
+                if (onlyEdited && !i.replaced) continue;
+                if (!q.isEmpty() && !i.name.toLowerCase(Locale.ROOT).contains(q)) continue;
+                shown.add(i);
+              }
+              if (bigFirst) Collections.sort(shown, (a, c) -> Long.compare(c.size, a.size));
+              else Collections.sort(shown, (a, c) -> a.name.compareTo(c.name));
+              info.setText(all.size() + " صورة · " + edited + " معدّلة · معروض " + shown.size());
+              adapter.notifyDataSetChanged();
+            }
+            static String shortName(String n) { return n.substring(n.lastIndexOf('/') + 1); }
+
+            class Adapter extends BaseAdapter {
+              public int getCount() { return shown.size(); }
+              public Object getItem(int p) { return shown.get(p); }
+              public long getItemId(int p) { return p; }
+              public View getView(int pos, View cv, ViewGroup parent) {
+                LinearLayout cell; ImageView iv; TextView name, badge;
+                if (cv == null) {
+                  cell = new LinearLayout(ProjectActivity.this); cell.setOrientation(LinearLayout.VERTICAL);
+                  cell.setBackground(U.bg(ProjectActivity.this, U.CARD, 10)); cell.setPadding(dp(4), dp(4), dp(4), dp(4));
+                  FrameLayout f = new FrameLayout(ProjectActivity.this);
+                  iv = new ImageView(ProjectActivity.this); iv.setScaleType(ImageView.ScaleType.FIT_CENTER); iv.setBackgroundColor(0xFF232B47);
+                  f.addView(iv, new FrameLayout.LayoutParams(-1, dp(100)));
+                  badge = U.tv(ProjectActivity.this, "✏️", 13, U.TXT); badge.setBackground(U.bg(ProjectActivity.this, 0xFF16A34A, 8)); badge.setPadding(dp(4), 0, dp(4), 0);
+                  f.addView(badge, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START));
+                  cell.addView(f);
+                  name = U.tv(ProjectActivity.this, "", 10, U.MUT); name.setSingleLine(true); name.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+                  name.setGravity(Gravity.CENTER); cell.addView(name);
+                  cell.setTag(new View[]{ iv, name, badge });
+                } else cell = (LinearLayout) cv;
+                View[] h = (View[]) cell.getTag(); iv = (ImageView) h[0]; name = (TextView) h[1]; badge = (TextView) h[2];
+                Apk.Img img = shown.get(pos);
+                name.setText(shortName(img.name)); badge.setVisibility(img.replaced ? View.VISIBLE : View.GONE);
+                iv.setTag(img.name);
+                Bitmap bm = cache.get(img.name);
+                if (bm != null) iv.setImageBitmap(bm);
+                else {
+                  iv.setImageDrawable(null);
+                  final ImageView target = iv; final String key = img.name;
+                  pool.execute(() -> {
+                    if (!key.equals(target.getTag())) return;
+                    Bitmap t = Apk.decode(dir, zip, key, 200);
+                    if (t == null) return;
+                    cache.put(key, t);
+                    runOnUiThread(() -> { if (key.equals(target.getTag())) target.setImageBitmap(t); });
+                  });
+                }
+                return cell;
+              }
+            }
+
+            void details(Apk.Img img) {
+              LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setPadding(dp(16), dp(10), dp(16), dp(6));
+              ImageView big = new ImageView(this); big.setScaleType(ImageView.ScaleType.FIT_CENTER); big.setBackgroundColor(0xFF232B47);
+              l.addView(big, new LinearLayout.LayoutParams(-1, dp(240)));
+              TextView meta = U.tv(this, img.name, 12, 0xFF555555); meta.setPadding(0, dp(8), 0, dp(4)); l.addView(meta);
+              CheckBox cbAll = new CheckBox(this); cbAll.setText("طبّق على كل مقاسات نفس الصورة"); cbAll.setChecked(allDens); l.addView(cbAll);
+              CheckBox cbSize = new CheckBox(this); cbSize.setText("خليها بنفس حجم الصورة الأصلية (أنصح بيها)"); cbSize.setChecked(keepSize); l.addView(cbSize);
+              if (Apk.isNinePatch(img.name)) l.addView(U.tv(this, "⚠️ هاي صورة 9-patch (خلفيات أزرار). تغييرها ممكن يخرّب شكل التطبيق.", 12, 0xFFB45309));
+              new Thread(() -> {
+                Bitmap bm = Apk.decode(dir, zip, img.name, 900); int[] d = Apk.dims(zip, img.name);
+                runOnUiThread(() -> { big.setImageBitmap(bm); meta.setText(img.name + "\n" + d[0] + "×" + d[1] + " · " + (img.size / 1024) + " KB" + (img.replaced ? " · ✏️ معدّلة" : "")); });
+              }).start();
+              AlertDialog.Builder bd = new AlertDialog.Builder(this).setTitle(shortName(img.name)).setView(l)
+                .setPositiveButton("🖼 تغيير الصورة", (x, y) -> {
+                  allDens = cbAll.isChecked(); keepSize = cbSize.isChecked(); pendingName = img.name;
+                  Intent i = new Intent(Intent.ACTION_GET_CONTENT); i.setType("image/*");
+                  startActivityForResult(Intent.createChooser(i, "اختار الصورة الجديدة"), REQ_IMG);
+                })
+                .setNeutralButton("⬇ حفظها", (x, y) -> saveImage(img));
+              if (img.replaced) bd.setNegativeButton("↩ رجّع الأصلية", (x, y) -> {
+                List<String> t = Apk.restore(dir, zip, img.name, cbAll.isChecked()); afterChange(t); U.toast(this, "رجعت الصورة الأصلية");
+              });
+              bd.show();
+            }
+            void saveImage(Apk.Img img) {
+              U.runBg(this, "حفظ الصورة", p -> {
+                File r = Apk.repl(dir, img.name);
+                String mime = img.name.toLowerCase(Locale.ROOT).endsWith(".png") ? "image/png" : img.name.toLowerCase(Locale.ROOT).endsWith(".webp") ? "image/webp" : "image/jpeg";
+                try (InputStream in = r.exists() ? new FileInputStream(r) : zip.getInputStream(zip.getEntry(img.name))) {
+                  return Apk.saveToDownloads(this, in, shortName(img.name), mime);
+                }
+              }, x -> U.toast(this, "انحفظت بمجلد التنزيلات Download"));
+            }
+            @Override protected void onActivityResult(int req, int res, Intent data) {
+              if (req != REQ_IMG || res != RESULT_OK || data == null || data.getData() == null || pendingName == null) return;
+              Uri u = data.getData(); String name = pendingName;
+              U.runBg(this, "تغيير الصورة", p -> Apk.replace(this, dir, zip, name, u, allDens, keepSize), r -> {
+                @SuppressWarnings("unchecked") List<String> t = (List<String>) r;
+                afterChange(t); U.toast(this, "تغيّرت " + t.size() + " صورة ✏️");
+              });
+            }
+            void afterChange(List<String> names) {
+              Set<String> s = new HashSet<>(names);
+              for (Apk.Img i : all) if (s.contains(i.name)) { i.replaced = Apk.repl(dir, i.name).exists(); cache.remove(i.name); }
+              filter();
+            }
+            void rebuild() {
+              if (Apk.countRepl(dir) == 0) { U.toast(this, "ما غيرت ولا صورة بعد"); return; }
+              U.runBg(this, "إعادة بناء التطبيق", p -> Apk.rebuild(this, dir, p), r -> {
+                Uri u = (Uri) r;
+                new AlertDialog.Builder(this).setTitle("✅ انبنى التطبيق")
+                  .setMessage("انحفظ بمجلد التنزيلات Download.\n\nإذا النسخة الأصلية مثبتة بالجوال، لازم تحذفها أول، لأن التوقيع صار مختلف.")
+                  .setPositiveButton("📲 تثبيت", (x, y) -> {
+                    Intent i = new Intent(Intent.ACTION_VIEW); i.setDataAndType(u, "application/vnd.android.package-archive");
+                    i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                    try { startActivity(i); } catch (Exception e) { U.toast(this, "افتحه من التنزيلات وثبته"); }
+                  })
+                  .setNegativeButton("تمام", null).show();
+              });
+            }
+            @Override protected void onDestroy() {
+              pool.shutdownNow();
+              try { if (zip != null) zip.close(); } catch (Exception ignored) {}
+              super.onDestroy();
+            }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk ApkImageEditor.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ApkImageEditor
+          path: ApkImageEditor.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: محرر صور التطبيقات v${{ github.run_number }}
+          files: ApkImageEditor.apk
