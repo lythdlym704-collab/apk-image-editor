@@ -46,8 +46,8 @@ jobs:
               applicationId 'com.apkimg.editor'
               minSdk 29
               targetSdk 34
-              versionCode 1
-              versionName '1.0'
+              versionCode 3
+              versionName '1.2'
             }
             compileOptions {
               sourceCompatibility JavaVersion.VERSION_17
@@ -73,6 +73,7 @@ jobs:
                   <category android:name="android.intent.category.LAUNCHER"/>
                 </intent-filter>
               </activity>
+              <receiver android:name=".InstallReceiver" android:exported="false"/>
               <activity android:name=".ProjectActivity" android:exported="false" android:windowSoftInputMode="adjustResize"/>
             </application>
           </manifest>
@@ -128,6 +129,7 @@ jobs:
           EOF
           cat > $J/Apk.java <<'EOF'
           package com.apkimg.editor;
+          import android.app.PendingIntent;
           import android.content.*;
           import android.content.pm.*;
           import android.graphics.*;
@@ -145,12 +147,28 @@ jobs:
           import java.util.zip.*;
 
           public class Apk {
-            public static class Img { public String name; public long size; public boolean replaced; }
+            public static class Img {
+              public String part, name; public long size; public boolean replaced;
+              public String key() { return part.isEmpty() ? name : part + "::" + name; }
+            }
+            /* مشروع = الملف الأساسي base.apk + الملفات المقسّمة splits/*.apk */
+            public static class Project {
+              public final File dir; public final LinkedHashMap<String, ZipFile> parts = new LinkedHashMap<>();
+              public Project(File dir) throws IOException {
+                this.dir = dir;
+                parts.put("", new ZipFile(base(dir)));
+                File[] s = new File(dir, "splits").listFiles();
+                if (s != null) { Arrays.sort(s); for (File f : s) if (f.getName().endsWith(".apk")) parts.put(f.getName().substring(0, f.getName().length() - 4), new ZipFile(f)); }
+              }
+              public File apkFile(String part) { return part.isEmpty() ? base(dir) : new File(dir, "splits/" + part + ".apk"); }
+              public File repl(String part, String name) { return part.isEmpty() ? new File(dir, "repl/" + name) : new File(dir, "repl_s/" + part + "/" + name); }
+              public ZipFile zip(String part) { return parts.get(part); }
+              public void close() { for (ZipFile z : parts.values()) try { z.close(); } catch (Exception ignored) {} }
+            }
 
             public static File root(Context c) { File f = new File(c.getFilesDir(), "projects"); f.mkdirs(); return f; }
             public static File base(File dir) { return new File(dir, "base.apk"); }
-            public static File replDir(File dir) { return new File(dir, "repl"); }
-            public static File repl(File dir, String name) { return new File(replDir(dir), name); }
+            public static int splitCount(File dir) { File[] s = new File(dir, "splits").listFiles(); return s == null ? 0 : s.length; }
             public static String readName(File dir) {
               try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(new File(dir, "name.txt")), "UTF-8"))) { return r.readLine(); }
               catch (Exception e) { return dir.getName(); }
@@ -169,7 +187,11 @@ jobs:
             public static void copy(InputStream in, OutputStream out) throws IOException {
               byte[] b = new byte[65536]; int n; while ((n = in.read(b)) > 0) out.write(b, 0, n);
             }
-            public static int countRepl(File dir) { return countFiles(replDir(dir)); }
+            static void copyFile(File a, File b) throws IOException {
+              b.getParentFile().mkdirs();
+              try (InputStream in = new FileInputStream(a); OutputStream o = new FileOutputStream(b)) { copy(in, o); }
+            }
+            public static int countRepl(File dir) { return countFiles(new File(dir, "repl")) + countFiles(new File(dir, "repl_s")); }
             static int countFiles(File f) {
               if (!f.exists()) return 0; if (f.isFile()) return 1;
               int n = 0; File[] k = f.listFiles(); if (k != null) for (File x : k) n += countFiles(x); return n;
@@ -178,22 +200,55 @@ jobs:
               if (f.isDirectory()) { File[] k = f.listFiles(); if (k != null) for (File x : k) deleteRec(x); }
               f.delete();
             }
+            static String nameOf(Context c, File baseApk, String fallback) {
+              try { PackageInfo pi = info(c, baseApk); if (pi != null) return c.getPackageManager().getApplicationLabel(pi.applicationInfo).toString(); } catch (Exception ignored) {}
+              return fallback == null ? "تطبيق" : fallback;
+            }
 
             /* ---------- استيراد ---------- */
-            public static File importStream(Context c, InputStream in, String fallbackName, U.Progress p) throws Exception {
-              File dir = new File(root(c), String.valueOf(System.currentTimeMillis())); dir.mkdirs();
-              File b = base(dir);
+            static File newDir(Context c) { File d = new File(root(c), String.valueOf(System.currentTimeMillis())); d.mkdirs(); return d; }
+            public static File importInstalled(Context c, ApplicationInfo a, String label, U.Progress p) throws Exception {
+              File dir = newDir(c);
+              p.set("نسخ الملف الأساسي...");
+              copyFile(new File(a.sourceDir), base(dir));
+              if (a.splitSourceDirs != null) for (String s : a.splitSourceDirs) {
+                File f = new File(s); p.set("نسخ " + f.getName());
+                copyFile(f, new File(dir, "splits/" + f.getName()));
+              }
+              writeName(dir, label);
+              return dir;
+            }
+            /* ملف APK عادي، أو حزمة مقسّمة APKS / XAPK / APKM */
+            public static File importStream(Context c, InputStream in, U.Progress p) throws Exception {
+              File dir = newDir(c);
+              File tmp = new File(dir, "incoming.zip");
               p.set("جاري نسخ الملف...");
-              try (InputStream i = in; OutputStream o = new FileOutputStream(b)) {
+              try (InputStream i = in; OutputStream o = new FileOutputStream(tmp)) {
                 byte[] buf = new byte[65536]; int n; long tot = 0, last = 0;
                 while ((n = i.read(buf)) > 0) { o.write(buf, 0, n); tot += n; if (tot - last > 2_000_000) { last = tot; p.set("انسخ " + (tot / 1_000_000) + " MB"); } }
               }
-              try (ZipFile z = new ZipFile(b)) {
-                if (z.getEntry("AndroidManifest.xml") == null) throw new Exception("هذا الملف مو APK صالح");
+              try (ZipFile z = new ZipFile(tmp)) {
+                if (z.getEntry("AndroidManifest.xml") != null) { z.close(); if (!tmp.renameTo(base(dir))) copyFile(tmp, base(dir)); }
+                else {
+                  List<ZipEntry> apks = new ArrayList<>();
+                  for (ZipEntry e : Collections.list(z.entries())) if (!e.isDirectory() && e.getName().toLowerCase(Locale.ROOT).endsWith(".apk")) apks.add(e);
+                  if (apks.isEmpty()) throw new Exception("هذا الملف مو APK ولا حزمة APKS");
+                  ZipEntry baseE = null;
+                  for (ZipEntry e : apks) { String s = e.getName().substring(e.getName().lastIndexOf('/') + 1); if (s.equals("base.apk")) baseE = e; }
+                  if (baseE == null) for (ZipEntry e : apks) { String s = e.getName().substring(e.getName().lastIndexOf('/') + 1);
+                    if (!s.startsWith("split_") && !s.startsWith("config.") && (baseE == null || e.getSize() > baseE.getSize())) baseE = e; }
+                  if (baseE == null) baseE = apks.get(0);
+                  for (ZipEntry e : apks) {
+                    String s = e.getName().substring(e.getName().lastIndexOf('/') + 1);
+                    File out = e == baseE ? base(dir) : new File(dir, "splits/" + s);
+                    p.set("فك " + s); out.getParentFile().mkdirs();
+                    try (InputStream is = z.getInputStream(e); OutputStream os = new FileOutputStream(out)) { copy(is, os); }
+                  }
+                }
               } catch (ZipException e) { deleteRec(dir); throw new Exception("هذا الملف مو APK صالح"); }
-              String name = fallbackName;
-              try { PackageInfo pi = info(c, b); if (pi != null) name = c.getPackageManager().getApplicationLabel(pi.applicationInfo).toString(); } catch (Exception ignored) {}
-              writeName(dir, name == null ? "تطبيق" : name);
+              tmp.delete();
+              try (ZipFile z = new ZipFile(base(dir))) { if (z.getEntry("AndroidManifest.xml") == null) throw new Exception("ما لكيت الملف الأساسي"); }
+              writeName(dir, nameOf(c, base(dir), "تطبيق"));
               return dir;
             }
 
@@ -203,20 +258,21 @@ jobs:
               return l.endsWith(".png") || l.endsWith(".jpg") || l.endsWith(".jpeg") || l.endsWith(".webp");
             }
             public static boolean isNinePatch(String n) { return n.toLowerCase(Locale.ROOT).endsWith(".9.png"); }
-            public static List<Img> list(File dir, ZipFile z) {
-              List<Img> out = new ArrayList<>(); Set<String> seen = new HashSet<>();
-              Enumeration<? extends ZipEntry> en = z.entries();
-              while (en.hasMoreElements()) {
-                ZipEntry e = en.nextElement();
-                if (e.isDirectory() || !isImage(e.getName()) || !seen.add(e.getName())) continue;
-                Img i = new Img(); i.name = e.getName(); i.size = e.getSize(); i.replaced = repl(dir, i.name).exists(); out.add(i);
+            public static List<Img> list(Project pr) {
+              List<Img> out = new ArrayList<>();
+              for (Map.Entry<String, ZipFile> pe : pr.parts.entrySet()) {
+                Set<String> seen = new HashSet<>();
+                for (ZipEntry e : Collections.list(pe.getValue().entries())) {
+                  if (e.isDirectory() || !isImage(e.getName()) || !seen.add(e.getName())) continue;
+                  Img i = new Img(); i.part = pe.getKey(); i.name = e.getName(); i.size = e.getSize(); i.replaced = pr.repl(i.part, i.name).exists(); out.add(i);
+                }
               }
               return out;
             }
             static int sample(int w, int h, int req) { int s = 1; while (w / (s * 2) >= req && h / (s * 2) >= req) s *= 2; return s; }
-            public static Bitmap decode(File dir, ZipFile z, String name, int req) {
+            public static Bitmap decode(Project pr, String part, String name, int req) {
               try {
-                File r = repl(dir, name);
+                File r = pr.repl(part, name); ZipFile z = pr.zip(part);
                 BitmapFactory.Options o = new BitmapFactory.Options(); o.inJustDecodeBounds = true;
                 if (r.exists()) BitmapFactory.decodeFile(r.getAbsolutePath(), o);
                 else try (InputStream in = z.getInputStream(z.getEntry(name))) { BitmapFactory.decodeStream(in, null, o); }
@@ -226,28 +282,30 @@ jobs:
                 try (InputStream in = z.getInputStream(z.getEntry(name))) { return BitmapFactory.decodeStream(in, null, o2); }
               } catch (Exception e) { return null; }
             }
-            public static int[] dims(ZipFile z, String name) {
+            public static int[] dims(Project pr, String part, String name) {
+              ZipFile z = pr.zip(part);
               try (InputStream in = z.getInputStream(z.getEntry(name))) {
                 BitmapFactory.Options o = new BitmapFactory.Options(); o.inJustDecodeBounds = true;
                 BitmapFactory.decodeStream(in, null, o); return new int[]{ o.outWidth, o.outHeight };
               } catch (Exception e) { return new int[]{ 0, 0 }; }
             }
-            /* نفس الصورة بمقاسات (كثافات) ثانية: res/drawable-hdpi/x.png و res/drawable-xxhdpi/x.png ... */
-            public static List<String> variants(ZipFile z, String name, boolean all) {
-              List<String> out = new ArrayList<>(); out.add(name);
-              if (!all || !name.startsWith("res/")) return out;
+            /* نفس الصورة بمقاسات ثانية (drawable-hdpi / drawable-xxhdpi ...) حتى لو بملفات مقسّمة ثانية */
+            public static List<String[]> variants(Project pr, String part, String name, boolean all) {
+              List<String[]> out = new ArrayList<>(); out.add(new String[]{ part, name });
+              if (!all || !name.startsWith("res/") || name.lastIndexOf('/') < 4) return out;
               String file = name.substring(name.lastIndexOf('/') + 1);
               String folder = name.substring(4, name.lastIndexOf('/'));
               String kind = folder.contains("-") ? folder.substring(0, folder.indexOf('-')) : folder;
-              Enumeration<? extends ZipEntry> en = z.entries();
-              while (en.hasMoreElements()) {
-                String n = en.nextElement().getName();
-                if (n.equals(name) || !n.startsWith("res/" + kind) || !n.endsWith("/" + file)) continue;
-                String f2 = n.substring(4, n.lastIndexOf('/'));
-                if (f2.equals(kind) || f2.startsWith(kind + "-")) out.add(n);
-              }
+              for (Map.Entry<String, ZipFile> pe : pr.parts.entrySet())
+                for (ZipEntry e : Collections.list(pe.getValue().entries())) {
+                  String n = e.getName();
+                  if ((pe.getKey().equals(part) && n.equals(name)) || !n.startsWith("res/" + kind) || !n.endsWith("/" + file)) continue;
+                  String f2 = n.substring(4, n.lastIndexOf('/'));
+                  if (f2.equals(kind) || f2.startsWith(kind + "-")) out.add(new String[]{ pe.getKey(), n });
+                }
               return out;
             }
+            static String key(String part, String name) { return part.isEmpty() ? name : part + "::" + name; }
             static Bitmap fit(Bitmap src, int w, int h) {
               float s = Math.max((float) w / src.getWidth(), (float) h / src.getHeight());
               int sw = Math.round(w / s), sh = Math.round(h / s);
@@ -265,46 +323,147 @@ jobs:
               else f = Bitmap.CompressFormat.PNG;
               try (OutputStream o = new FileOutputStream(out)) { if (!b.compress(f, q, o)) throw new IOException("ما كدرت أحفظ الصورة"); }
             }
-            public static List<String> replace(Context c, File dir, ZipFile z, String name, Uri src, boolean all, boolean keepSize) throws Exception {
+            /* ---------- تحديد الصور المشابهة (بصمة الصورة) ---------- */
+            static File hashFile(Project pr) { return new File(pr.dir, "hashes.txt"); }
+            static Map<String, long[]> loadHashes(Project pr) {
+              Map<String, long[]> m = new HashMap<>();
+              try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(hashFile(pr)), "UTF-8"))) {
+                String l; while ((l = r.readLine()) != null) { String[] a = l.split("\t"); if (a.length == 4) m.put(a[0], new long[]{ Long.parseLong(a[1]), Long.parseLong(a[2]), Long.parseLong(a[3]) }); }
+              } catch (Exception ignored) {}
+              return m;
+            }
+            static void saveHashes(Project pr, Map<String, long[]> m) {
+              try (Writer w = new OutputStreamWriter(new FileOutputStream(hashFile(pr)), "UTF-8")) {
+                for (Map.Entry<String, long[]> e : m.entrySet()) w.write(e.getKey() + "\t" + e.getValue()[0] + "\t" + e.getValue()[1] + "\t" + e.getValue()[2] + "\n");
+              } catch (Exception ignored) {}
+            }
+            /* بصمة الصورة الأصلية: 64 بت (dHash) على خلفية رمادية حتى الشكل الشفاف يحسب */
+            static long[] fingerprint(Project pr, String part, String name) {
+              ZipFile z = pr.zip(part);
+              try {
+                BitmapFactory.Options o = new BitmapFactory.Options(); o.inJustDecodeBounds = true;
+                try (InputStream in = z.getInputStream(z.getEntry(name))) { BitmapFactory.decodeStream(in, null, o); }
+                if (o.outWidth <= 0) return null;
+                BitmapFactory.Options o2 = new BitmapFactory.Options(); o2.inSampleSize = sample(o.outWidth, o.outHeight, 32);
+                Bitmap b; try (InputStream in = z.getInputStream(z.getEntry(name))) { b = BitmapFactory.decodeStream(in, null, o2); }
+                if (b == null) return null;
+                Bitmap g = Bitmap.createBitmap(9, 8, Bitmap.Config.ARGB_8888);
+                Canvas cv = new Canvas(g); cv.drawColor(0xFF808080);
+                cv.drawBitmap(b, null, new Rect(0, 0, 9, 8), new Paint(Paint.FILTER_BITMAP_FLAG));
+                int[] px = new int[72]; g.getPixels(px, 0, 9, 0, 0, 9, 8);
+                long h = 0; int bit = 0;
+                for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) {
+                  if (lum(px[y * 9 + x]) > lum(px[y * 9 + x + 1])) h |= (1L << bit);
+                  bit++;
+                }
+                return new long[]{ h, o.outWidth, o.outHeight };
+              } catch (Exception e) { return null; }
+            }
+            static int lum(int c) { return ((c >> 16) & 255) * 3 + ((c >> 8) & 255) * 6 + (c & 255); }
+            public static List<String[]> similar(Project pr, String part, String name, U.Progress p) {
+              List<Img> imgs = list(pr);
+              Map<String, long[]> hs = loadHashes(pr); boolean changed = false; int i = 0;
+              for (Img im : imgs) {
+                i++;
+                if (!hs.containsKey(im.key())) {
+                  if (i % 25 == 0) p.set("أدور على الصور المشابهة " + i + " / " + imgs.size());
+                  long[] f = fingerprint(pr, im.part, im.name); hs.put(im.key(), f == null ? new long[]{ 0, 0, 0 } : f); changed = true;
+                }
+              }
+              if (changed) saveHashes(pr, hs);
+              long[] t = hs.get(key(part, name));
+              LinkedHashMap<String, String[]> out = new LinkedHashMap<>();
+              for (String[] v : variants(pr, part, name, true)) out.put(key(v[0], v[1]), v);
+              if (t != null && t[1] > 0) {
+                double a0 = (double) t[1] / t[2];
+                for (Img im : imgs) {
+                  long[] f = hs.get(im.key()); if (f == null || f[1] <= 0) continue;
+                  double a = (double) f[1] / f[2];
+                  if (Math.abs(a - a0) / a0 > 0.12) continue;
+                  if (Long.bitCount(f[0] ^ t[0]) <= 5) out.put(im.key(), new String[]{ im.part, im.name });
+                }
+              }
+              return new ArrayList<>(out.values());
+            }
+
+            /* ---------- وضع الصورة الجديدة بنفس مكان وحجم الرسمة الأصلية ---------- */
+            static Rect alphaBox(Bitmap b) {
+              if (!b.hasAlpha()) return null;
+              int w = b.getWidth(), h = b.getHeight(), minX = w, minY = h, maxX = -1, maxY = -1;
+              int[] row = new int[w];
+              for (int y = 0; y < h; y++) {
+                b.getPixels(row, 0, w, 0, y, w, 1);
+                for (int x = 0; x < w; x++) if ((row[x] >>> 24) > 12) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+              }
+              if (maxX < 0) return null;
+              if (minX == 0 && minY == 0 && maxX == w - 1 && maxY == h - 1) {
+                int[] c = new int[4]; c[0] = b.getPixel(0, 0); c[1] = b.getPixel(w - 1, 0); c[2] = b.getPixel(0, h - 1); c[3] = b.getPixel(w - 1, h - 1);
+                boolean opaqueCorners = true; for (int k : c) if ((k >>> 24) < 250) opaqueCorners = false;
+                if (opaqueCorners) return null;
+              }
+              return new Rect(minX, minY, maxX + 1, maxY + 1);
+            }
+            static Bitmap place(Bitmap neu, Bitmap orig) {
+              int w = orig.getWidth(), h = orig.getHeight();
+              Rect box = alphaBox(orig);
+              if (box == null) return fit(neu, w, h);            /* صورة كاملة (خلفية): تملي نفس الحجم */
+              Rect src = alphaBox(neu); if (src == null) src = new Rect(0, 0, neu.getWidth(), neu.getHeight());
+              float s = Math.min((float) box.width() / src.width(), (float) box.height() / src.height());
+              int dw = Math.max(1, Math.round(src.width() * s)), dh = Math.max(1, Math.round(src.height() * s));
+              int dx = box.left + (box.width() - dw) / 2, dy = box.bottom - dh;  /* بالنص، وقاعدتها على نفس خط الأصلية */
+              Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+              new Canvas(out).drawBitmap(neu, src, new Rect(dx, dy, dx + dw, dy + dh), new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG));
+              return out;
+            }
+            static Bitmap original(Project pr, String part, String name) {
+              ZipFile z = pr.zip(part);
+              try (InputStream in = z.getInputStream(z.getEntry(name))) {
+                BitmapFactory.Options o = new BitmapFactory.Options(); o.inPreferredConfig = Bitmap.Config.ARGB_8888;
+                return BitmapFactory.decodeStream(in, null, o);
+              } catch (Exception e) { return null; }
+            }
+            public static List<String> replace(Context c, Project pr, List<String[]> targets, Uri src, U.Progress p) throws Exception {
               BitmapFactory.Options o = new BitmapFactory.Options(); o.inJustDecodeBounds = true;
               try (InputStream in = c.getContentResolver().openInputStream(src)) { BitmapFactory.decodeStream(in, null, o); }
               if (o.outWidth <= 0) throw new Exception("الصورة المختارة ما تنفتح");
-              BitmapFactory.Options o2 = new BitmapFactory.Options(); o2.inSampleSize = sample(o.outWidth, o.outHeight, 2048);
+              BitmapFactory.Options o2 = new BitmapFactory.Options(); o2.inSampleSize = sample(o.outWidth, o.outHeight, 2048); o2.inPreferredConfig = Bitmap.Config.ARGB_8888;
               Bitmap img;
               try (InputStream in = c.getContentResolver().openInputStream(src)) { img = BitmapFactory.decodeStream(in, null, o2); }
               if (img == null) throw new Exception("الصورة المختارة ما تنفتح");
-              List<String> targets = variants(z, name, all);
-              for (String t : targets) {
-                Bitmap outB = img;
-                if (keepSize) { int[] d = dims(z, t); if (d[0] > 0 && d[1] > 0) outB = fit(img, d[0], d[1]); }
-                encode(outB, t, repl(dir, t));
+              List<String> keys = new ArrayList<>(); int i = 0;
+              for (String[] t : targets) {
+                i++; p.set("تغيير " + i + " / " + targets.size());
+                Bitmap orig = original(pr, t[0], t[1]);
+                Bitmap outB = orig == null ? img : place(img, orig);
+                encode(outB, t[1], pr.repl(t[0], t[1])); keys.add(key(t[0], t[1]));
               }
-              return targets;
+              return keys;
             }
-            public static List<String> restore(File dir, ZipFile z, String name, boolean all) {
-              List<String> t = variants(z, name, all);
-              for (String n : t) repl(dir, n).delete();
-              return t;
+            public static List<String> restoreTargets(Project pr, List<String[]> targets) {
+              List<String> keys = new ArrayList<>();
+              for (String[] t : targets) { pr.repl(t[0], t[1]).delete(); keys.add(key(t[0], t[1])); }
+              return keys;
             }
 
+
             /* ---------- إعادة البناء والتوقيع ---------- */
+            public static class Result { public List<File> apks = new ArrayList<>(); public Uri download; public String fileName; }
             static boolean isSignatureFile(String n) {
               if (n.equals("stamp-cert-sha256")) return true;
               if (!n.startsWith("META-INF/")) return false;
               String u = n.toUpperCase(Locale.ROOT);
               return u.equals("META-INF/MANIFEST.MF") || u.endsWith(".SF") || u.endsWith(".RSA") || u.endsWith(".DSA") || u.endsWith(".EC");
             }
-            public static Uri rebuild(Context c, File dir, U.Progress p) throws Exception {
-              File unsigned = new File(c.getCacheDir(), "unsigned.apk"), signed = new File(c.getCacheDir(), "signed.apk");
-              unsigned.delete(); signed.delete();
-              try (ZipFile z = new ZipFile(base(dir)); ZipOutputStream zo = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(unsigned), 1 << 16))) {
+            static void buildUnsigned(Project pr, String part, File out, U.Progress p, String label) throws Exception {
+              ZipFile z = pr.zip(part);
+              try (ZipOutputStream zo = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(out), 1 << 16))) {
                 List<? extends ZipEntry> all = Collections.list(z.entries());
                 Set<String> seen = new HashSet<>(); int i = 0;
                 for (ZipEntry e : all) {
-                  i++; if (i % 50 == 0) p.set("جاري البناء " + i + " / " + all.size());
+                  i++; if (i % 50 == 0) p.set(label + " " + i + " / " + all.size());
                   String n = e.getName();
                   if (e.isDirectory() || isSignatureFile(n) || !seen.add(n)) continue;
-                  File r = repl(dir, n);
+                  File r = pr.repl(part, n);
                   ZipEntry ne = new ZipEntry(n);
                   if (e.getTime() > 0) ne.setTime(e.getTime());
                   if (e.getMethod() == ZipEntry.STORED) {
@@ -320,24 +479,72 @@ jobs:
                   zo.closeEntry();
                 }
               }
-              p.set("جاري التوقيع...");
+            }
+            static void sign(Context c, File in, File out) throws Exception {
               char[] pass = "apkimg123".toCharArray();
               KeyStore ks = KeyStore.getInstance("PKCS12");
-              try (InputStream in = c.getAssets().open("sign.p12")) { ks.load(in, pass); }
+              try (InputStream is = c.getAssets().open("sign.p12")) { ks.load(is, pass); }
               PrivateKey pk = (PrivateKey) ks.getKey("mod", pass);
               X509Certificate cert = (X509Certificate) ks.getCertificate("mod");
               ApkSigner.SignerConfig sc = new ApkSigner.SignerConfig.Builder("MOD", pk, Collections.singletonList(cert)).build();
               new ApkSigner.Builder(Collections.singletonList(sc))
-                .setInputApk(unsigned).setOutputApk(signed)
+                .setInputApk(in).setOutputApk(out)
                 .setV1SigningEnabled(true).setV2SigningEnabled(true).setV3SigningEnabled(false)
                 .build().sign();
-              unsigned.delete();
-              p.set("جاري الحفظ بالتنزيلات...");
-              String fname = readName(dir).replaceAll("[\\\\/:*?\"<>|]", "_") + "_mod_" + (System.currentTimeMillis() / 1000 % 100000) + ".apk";
-              Uri u = saveToDownloads(c, signed, fname, "application/vnd.android.package-archive");
-              signed.delete();
-              return u;
             }
+            public static Result rebuild(Context c, Project pr, U.Progress p) throws Exception {
+              File outDir = new File(c.getExternalFilesDir(null), "out"); deleteRec(outDir); outDir.mkdirs();
+              File tmp = new File(c.getCacheDir(), "unsigned.apk");
+              Result res = new Result();
+              int k = 0, n = pr.parts.size();
+              for (String part : pr.parts.keySet()) {
+                k++;
+                String fname = part.isEmpty() ? "base.apk" : part + ".apk";
+                String label = n > 1 ? "بناء الملف " + k + " من " + n : "جاري البناء";
+                tmp.delete(); buildUnsigned(pr, part, tmp, p, label);
+                p.set(label + " · توقيع...");
+                File signed = new File(outDir, fname); sign(c, tmp, signed); res.apks.add(signed);
+              }
+              tmp.delete();
+              p.set("جاري الحفظ بالتنزيلات...");
+              String nm = readName(pr.dir).replaceAll("[\\\\/:*?\"<>|]", "_") + "_mod_" + (System.currentTimeMillis() / 1000 % 100000);
+              if (res.apks.size() == 1) {
+                res.fileName = nm + ".apk";
+                res.download = saveToDownloads(c, res.apks.get(0), res.fileName, "application/vnd.android.package-archive");
+              } else {
+                File bundle = new File(c.getCacheDir(), "bundle.apks");
+                try (ZipOutputStream zo = new ZipOutputStream(new FileOutputStream(bundle))) {
+                  for (File f : res.apks) {
+                    ZipEntry e = new ZipEntry(f.getName()); e.setMethod(ZipEntry.STORED);
+                    CRC32 crc = new CRC32();
+                    try (InputStream in = new FileInputStream(f)) { byte[] b = new byte[65536]; int r; while ((r = in.read(b)) > 0) crc.update(b, 0, r); }
+                    e.setSize(f.length()); e.setCompressedSize(f.length()); e.setCrc(crc.getValue());
+                    zo.putNextEntry(e); try (InputStream in = new FileInputStream(f)) { copy(in, zo); } zo.closeEntry();
+                  }
+                }
+                res.fileName = nm + ".apks";
+                res.download = saveToDownloads(c, bundle, res.fileName, "application/octet-stream");
+                bundle.delete();
+              }
+              return res;
+            }
+
+            /* ---------- التثبيت (يدعم الملفات المقسّمة) ---------- */
+            public static void install(Context c, List<File> apks) throws Exception {
+              PackageInstaller pi = c.getPackageManager().getPackageInstaller();
+              PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
+              int id = pi.createSession(params);
+              try (PackageInstaller.Session s = pi.openSession(id)) {
+                for (File f : apks) {
+                  try (InputStream in = new FileInputStream(f); OutputStream o = s.openWrite(f.getName(), 0, f.length())) { copy(in, o); s.fsync(o); }
+                }
+                Intent cb = new Intent(c, InstallReceiver.class);
+                int flags = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE : PendingIntent.FLAG_UPDATE_CURRENT;
+                PendingIntent p = PendingIntent.getBroadcast(c, id, cb, flags);
+                s.commit(p.getIntentSender());
+              }
+            }
+
             public static Uri saveToDownloads(Context c, File f, String name, String mime) throws Exception {
               try (InputStream in = new FileInputStream(f)) { return saveToDownloads(c, in, name, mime); }
             }
@@ -408,7 +615,8 @@ jobs:
                 LinearLayout t = new LinearLayout(this); t.setOrientation(LinearLayout.VERTICAL); t.setPadding(dp(12), 0, dp(12), 0);
                 t.addView(U.tv(this, Apk.readName(d), 17, U.TXT));
                 int n = Apk.countRepl(d);
-                t.addView(U.tv(this, (Apk.base(d).length() / 1_000_000) + " MB" + (n > 0 ? " · " + n + " صورة معدّلة ✏️" : ""), 12, U.MUT));
+                int sp = Apk.splitCount(d);
+                t.addView(U.tv(this, (Apk.base(d).length() / 1_000_000) + " MB" + (sp > 0 ? " · " + (sp + 1) + " ملفات" : "") + (n > 0 ? " · " + n + " صورة معدّلة ✏️" : ""), 12, U.MUT));
                 row.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
                 row.setOnClickListener(v -> startActivity(new Intent(this, ProjectActivity.class).putExtra("dir", d.getAbsolutePath())));
                 row.setOnLongClickListener(v -> { askDelete(d); return true; });
@@ -423,7 +631,7 @@ jobs:
             }
             void addMenu() {
               new AlertDialog.Builder(this).setTitle("أضف تطبيقك")
-                .setItems(new String[]{ "📁 من ملف APK", "📱 من التطبيقات المثبتة بالجوال" }, (x, w) -> { if (w == 0) pickFile(); else pickInstalled(); })
+                .setItems(new String[]{ "📁 من ملف APK / APKS / XAPK", "📱 من التطبيقات المثبتة بالجوال (الأضمن)" }, (x, w) -> { if (w == 0) pickFile(); else pickInstalled(); })
                 .show();
             }
             void pickFile() {
@@ -434,7 +642,7 @@ jobs:
             @Override protected void onActivityResult(int req, int res, Intent data) {
               if (req != REQ_FILE || res != RESULT_OK || data == null || data.getData() == null) return;
               Uri u = data.getData();
-              U.runBg(this, "استيراد التطبيق", p -> Apk.importStream(this, getContentResolver().openInputStream(u), "تطبيق", p), r -> open((File) r));
+              U.runBg(this, "استيراد التطبيق", p -> Apk.importStream(this, getContentResolver().openInputStream(u), p), r -> open((File) r));
             }
             void pickInstalled() {
               PackageManager pm = getPackageManager();
@@ -446,12 +654,7 @@ jobs:
               for (int k = 0; k < names.length; k++) names[k] = pm.getApplicationLabel(apps.get(k)).toString();
               new AlertDialog.Builder(this).setTitle("اختار التطبيق").setItems(names, (x, w) -> {
                 ApplicationInfo a = apps.get(w); String label = names[w];
-                Runnable go = () -> U.runBg(this, "استيراد " + label, p -> Apk.importStream(this, new FileInputStream(a.sourceDir), label, p), r -> open((File) r));
-                if (a.splitSourceDirs != null && a.splitSourceDirs.length > 0)
-                  new AlertDialog.Builder(this).setTitle("تنبيه")
-                    .setMessage("هذا التطبيق مقسّم لعدة ملفات (Split APK). أكدر أطلّع الصور الأساسية منه، بس النسخة المعدّلة ممكن ما تتثبت لوحدها. الأحسن تستعمل ملف APK كامل.")
-                    .setPositiveButton("كمّل", (q, z) -> go.run()).setNegativeButton("إلغاء", null).show();
-                else go.run();
+                U.runBg(this, "استيراد " + label, p -> Apk.importInstalled(this, a, label, p), r -> open((File) r));
               }).show();
             }
             void open(File dir) { startActivity(new Intent(this, ProjectActivity.class).putExtra("dir", dir.getAbsolutePath())); }
@@ -475,10 +678,10 @@ jobs:
 
           public class ProjectActivity extends Activity {
             static final int REQ_IMG = 21;
-            File dir; ZipFile zip; List<Apk.Img> all = new ArrayList<>(), shown = new ArrayList<>();
+            File dir; Apk.Project proj; List<Apk.Img> all = new ArrayList<>(), shown = new ArrayList<>();
             GridView grid; EditText search; TextView info; Adapter adapter;
-            boolean bigFirst = true, onlyEdited = false, allDens = true, keepSize = true;
-            String pendingName;
+            boolean bigFirst = true, onlyEdited = false, allDens = true;
+            Apk.Img pendingImg;
             final ExecutorService pool = Executors.newFixedThreadPool(3);
             final LruCache<String, Bitmap> cache = new LruCache<String, Bitmap>(24 * 1024 * 1024) {
               @Override protected int sizeOf(String k, Bitmap b) { return b.getByteCount(); }
@@ -511,7 +714,7 @@ jobs:
               l.addView(grid, new LinearLayout.LayoutParams(-1, 0, 1));
               l.addView(U.btn(this, "🔨 إعادة البناء والتصدير للتنزيلات", U.GOLD, v -> rebuild()));
               setContentView(l);
-              U.runBg(this, "فتح التطبيق", p -> { zip = new ZipFile(Apk.base(dir)); return Apk.list(dir, zip); }, r -> {
+              U.runBg(this, "فتح التطبيق", p -> { proj = new Apk.Project(dir); return Apk.list(proj); }, r -> {
                 @SuppressWarnings("unchecked") List<Apk.Img> imgs = (List<Apk.Img>) r; all = imgs; filter();
               });
             }
@@ -531,12 +734,13 @@ jobs:
               for (Apk.Img i : all) {
                 if (i.replaced) edited++;
                 if (onlyEdited && !i.replaced) continue;
-                if (!q.isEmpty() && !i.name.toLowerCase(Locale.ROOT).contains(q)) continue;
+                if (!q.isEmpty() && !i.key().toLowerCase(Locale.ROOT).contains(q)) continue;
                 shown.add(i);
               }
               if (bigFirst) Collections.sort(shown, (a, c) -> Long.compare(c.size, a.size));
               else Collections.sort(shown, (a, c) -> a.name.compareTo(c.name));
-              info.setText(all.size() + " صورة · " + edited + " معدّلة · معروض " + shown.size());
+              int sp = Apk.splitCount(dir);
+              info.setText(all.size() + " صورة · " + edited + " معدّلة · معروض " + shown.size() + (sp > 0 ? " · مقسّم " + (sp + 1) + " ملفات" : ""));
               adapter.notifyDataSetChanged();
             }
             static String shortName(String n) { return n.substring(n.lastIndexOf('/') + 1); }
@@ -563,106 +767,9 @@ jobs:
                 View[] h = (View[]) cell.getTag(); iv = (ImageView) h[0]; name = (TextView) h[1]; badge = (TextView) h[2];
                 Apk.Img img = shown.get(pos);
                 name.setText(shortName(img.name)); badge.setVisibility(img.replaced ? View.VISIBLE : View.GONE);
-                iv.setTag(img.name);
-                Bitmap bm = cache.get(img.name);
+                iv.setTag(img.key());
+                Bitmap bm = cache.get(img.key());
                 if (bm != null) iv.setImageBitmap(bm);
                 else {
                   iv.setImageDrawable(null);
-                  final ImageView target = iv; final String key = img.name;
-                  pool.execute(() -> {
-                    if (!key.equals(target.getTag())) return;
-                    Bitmap t = Apk.decode(dir, zip, key, 200);
-                    if (t == null) return;
-                    cache.put(key, t);
-                    runOnUiThread(() -> { if (key.equals(target.getTag())) target.setImageBitmap(t); });
-                  });
-                }
-                return cell;
-              }
-            }
-
-            void details(Apk.Img img) {
-              LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setPadding(dp(16), dp(10), dp(16), dp(6));
-              ImageView big = new ImageView(this); big.setScaleType(ImageView.ScaleType.FIT_CENTER); big.setBackgroundColor(0xFF232B47);
-              l.addView(big, new LinearLayout.LayoutParams(-1, dp(240)));
-              TextView meta = U.tv(this, img.name, 12, 0xFF555555); meta.setPadding(0, dp(8), 0, dp(4)); l.addView(meta);
-              CheckBox cbAll = new CheckBox(this); cbAll.setText("طبّق على كل مقاسات نفس الصورة"); cbAll.setChecked(allDens); l.addView(cbAll);
-              CheckBox cbSize = new CheckBox(this); cbSize.setText("خليها بنفس حجم الصورة الأصلية (أنصح بيها)"); cbSize.setChecked(keepSize); l.addView(cbSize);
-              if (Apk.isNinePatch(img.name)) l.addView(U.tv(this, "⚠️ هاي صورة 9-patch (خلفيات أزرار). تغييرها ممكن يخرّب شكل التطبيق.", 12, 0xFFB45309));
-              new Thread(() -> {
-                Bitmap bm = Apk.decode(dir, zip, img.name, 900); int[] d = Apk.dims(zip, img.name);
-                runOnUiThread(() -> { big.setImageBitmap(bm); meta.setText(img.name + "\n" + d[0] + "×" + d[1] + " · " + (img.size / 1024) + " KB" + (img.replaced ? " · ✏️ معدّلة" : "")); });
-              }).start();
-              AlertDialog.Builder bd = new AlertDialog.Builder(this).setTitle(shortName(img.name)).setView(l)
-                .setPositiveButton("🖼 تغيير الصورة", (x, y) -> {
-                  allDens = cbAll.isChecked(); keepSize = cbSize.isChecked(); pendingName = img.name;
-                  Intent i = new Intent(Intent.ACTION_GET_CONTENT); i.setType("image/*");
-                  startActivityForResult(Intent.createChooser(i, "اختار الصورة الجديدة"), REQ_IMG);
-                })
-                .setNeutralButton("⬇ حفظها", (x, y) -> saveImage(img));
-              if (img.replaced) bd.setNegativeButton("↩ رجّع الأصلية", (x, y) -> {
-                List<String> t = Apk.restore(dir, zip, img.name, cbAll.isChecked()); afterChange(t); U.toast(this, "رجعت الصورة الأصلية");
-              });
-              bd.show();
-            }
-            void saveImage(Apk.Img img) {
-              U.runBg(this, "حفظ الصورة", p -> {
-                File r = Apk.repl(dir, img.name);
-                String mime = img.name.toLowerCase(Locale.ROOT).endsWith(".png") ? "image/png" : img.name.toLowerCase(Locale.ROOT).endsWith(".webp") ? "image/webp" : "image/jpeg";
-                try (InputStream in = r.exists() ? new FileInputStream(r) : zip.getInputStream(zip.getEntry(img.name))) {
-                  return Apk.saveToDownloads(this, in, shortName(img.name), mime);
-                }
-              }, x -> U.toast(this, "انحفظت بمجلد التنزيلات Download"));
-            }
-            @Override protected void onActivityResult(int req, int res, Intent data) {
-              if (req != REQ_IMG || res != RESULT_OK || data == null || data.getData() == null || pendingName == null) return;
-              Uri u = data.getData(); String name = pendingName;
-              U.runBg(this, "تغيير الصورة", p -> Apk.replace(this, dir, zip, name, u, allDens, keepSize), r -> {
-                @SuppressWarnings("unchecked") List<String> t = (List<String>) r;
-                afterChange(t); U.toast(this, "تغيّرت " + t.size() + " صورة ✏️");
-              });
-            }
-            void afterChange(List<String> names) {
-              Set<String> s = new HashSet<>(names);
-              for (Apk.Img i : all) if (s.contains(i.name)) { i.replaced = Apk.repl(dir, i.name).exists(); cache.remove(i.name); }
-              filter();
-            }
-            void rebuild() {
-              if (Apk.countRepl(dir) == 0) { U.toast(this, "ما غيرت ولا صورة بعد"); return; }
-              U.runBg(this, "إعادة بناء التطبيق", p -> Apk.rebuild(this, dir, p), r -> {
-                Uri u = (Uri) r;
-                new AlertDialog.Builder(this).setTitle("✅ انبنى التطبيق")
-                  .setMessage("انحفظ بمجلد التنزيلات Download.\n\nإذا النسخة الأصلية مثبتة بالجوال، لازم تحذفها أول، لأن التوقيع صار مختلف.")
-                  .setPositiveButton("📲 تثبيت", (x, y) -> {
-                    Intent i = new Intent(Intent.ACTION_VIEW); i.setDataAndType(u, "application/vnd.android.package-archive");
-                    i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
-                    try { startActivity(i); } catch (Exception e) { U.toast(this, "افتحه من التنزيلات وثبته"); }
-                  })
-                  .setNegativeButton("تمام", null).show();
-              });
-            }
-            @Override protected void onDestroy() {
-              pool.shutdownNow();
-              try { if (zip != null) zip.close(); } catch (Exception ignored) {}
-              super.onDestroy();
-            }
-          }
-          EOF
-
-      - name: Build APK
-        run: gradle :app:assembleDebug --no-daemon
-
-      - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk ApkImageEditor.apk
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ApkImageEditor
-          path: ApkImageEditor.apk
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ github.run_number }}
-          name: محرر صور التطبيقات v${{ github.run_number }}
-          files: ApkImageEditor.apk
+                  final ImageView target = iv; fin
