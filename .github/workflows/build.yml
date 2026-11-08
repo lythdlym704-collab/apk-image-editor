@@ -46,8 +46,8 @@ jobs:
               applicationId 'com.apkimg.editor'
               minSdk 29
               targetSdk 34
-              versionCode 4
-              versionName '1.3'
+              versionCode 6
+              versionName '1.5'
             }
             compileOptions {
               sourceCompatibility JavaVersion.VERSION_17
@@ -75,6 +75,7 @@ jobs:
               </activity>
               <receiver android:name=".InstallReceiver" android:exported="false"/>
               <activity android:name=".AtlasActivity" android:exported="false"/>
+              <activity android:name=".SoundsActivity" android:exported="false" android:windowSoftInputMode="adjustResize"/>
               <activity android:name=".ProjectActivity" android:exported="false" android:windowSoftInputMode="adjustResize"/>
             </application>
           </manifest>
@@ -407,7 +408,11 @@ jobs:
             public static Bitmap place(Bitmap neu, Bitmap orig) {
               int w = orig.getWidth(), h = orig.getHeight();
               Rect box = alphaBox(orig);
-              if (box == null) return fit(neu, w, h);            /* صورة كاملة (خلفية): تملي نفس الحجم */
+              if (box == null) {                                 /* صورة كاملة بدون شفافية (خلفية أو أيقونة بخلفية) */
+                Bitmap out = orig.copy(Bitmap.Config.ARGB_8888, true);
+                new Canvas(out).drawBitmap(fit(neu, w, h), 0, 0, new Paint(Paint.FILTER_BITMAP_FLAG));
+                return out;
+              }
               Rect src = alphaBox(neu); if (src == null) src = new Rect(0, 0, neu.getWidth(), neu.getHeight());
               float s = Math.min((float) box.width() / src.width(), (float) box.height() / src.height());
               int dw = Math.max(1, Math.round(src.width() * s)), dh = Math.max(1, Math.round(src.height() * s));
@@ -678,7 +683,7 @@ jobs:
           import java.util.zip.*;
 
           public class ProjectActivity extends Activity {
-            static final int REQ_IMG = 21, REQ_ATLAS = 22;
+            static final int REQ_IMG = 21, REQ_ATLAS = 22, REQ_SOUNDS = 23;
             File dir; Apk.Project proj; List<Apk.Img> all = new ArrayList<>(), shown = new ArrayList<>();
             GridView grid; EditText search; TextView info; Adapter adapter;
             boolean bigFirst = true, onlyEdited = false, allDens = true;
@@ -696,7 +701,8 @@ jobs:
               LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setBackgroundColor(U.BG);
               l.setPadding(dp(12), dp(16), dp(12), dp(10));
               l.addView(U.tv(this, Apk.readName(dir), 21, U.GOLD));
-              info = U.tv(this, "جاري قراءة الصور...", 12, U.MUT); info.setPadding(0, dp(2), 0, dp(8)); l.addView(info);
+              l.addView(tabs(this, 0, null, () -> startActivityForResult(new Intent(this, SoundsActivity.class).putExtra("dir", dir.getAbsolutePath()), REQ_SOUNDS)));
+              info = U.tv(this, "جاري قراءة الصور...", 12, U.MUT); info.setPadding(0, dp(4), 0, dp(8)); l.addView(info);
               search = new EditText(this); search.setHint("🔍 ابحث عن صورة (مثلاً car أو bg)"); search.setSingleLine(true);
               search.setTextColor(U.TXT); search.setHintTextColor(U.MUT); search.setBackground(U.bg(this, U.CARD2, 12)); search.setPadding(dp(12), dp(10), dp(12), dp(10));
               search.addTextChangedListener(new TextWatcher() {
@@ -717,6 +723,34 @@ jobs:
               setContentView(l);
               U.runBg(this, "فتح التطبيق", p -> { proj = new Apk.Project(dir); return Apk.list(proj); }, r -> {
                 @SuppressWarnings("unchecked") List<Apk.Img> imgs = (List<Apk.Img>) r; all = imgs; filter();
+              });
+            }
+            /* خانات أعلى الشاشة: 🖼 الصور | 🔊 الأصوات */
+            static LinearLayout tabs(Activity a, int selected, Runnable toImages, Runnable toSounds) {
+              LinearLayout t = new LinearLayout(a); t.setPadding(0, U.dp(a, 8), 0, 0);
+              String[] names = { "🖼 الصور", "🔊 الأصوات" };
+              for (int i = 0; i < 2; i++) {
+                TextView v = U.tv(a, names[i], 15, i == selected ? 0xFF1A1300 : U.TXT);
+                v.setGravity(Gravity.CENTER); v.setPadding(0, U.dp(a, 9), 0, U.dp(a, 9));
+                v.setBackground(U.bg(a, i == selected ? U.GOLD : U.CARD2, 12));
+                final Runnable go = i == 0 ? toImages : toSounds;
+                if (i != selected && go != null) v.setOnClickListener(x -> go.run());
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1); lp.setMargins(U.dp(a, 3), 0, U.dp(a, 3), 0);
+                t.addView(v, lp);
+              }
+              return t;
+            }
+            /* إعادة البناء + التثبيت (مشتركة بين الصور والأصوات) */
+            static void rebuildFlow(Activity a, Apk.Project pr, File dir) {
+              if (pr == null) return;
+              if (Apk.countRepl(dir) == 0) { U.toast(a, "ما غيرت ولا شي بعد"); return; }
+              U.runBg(a, "إعادة بناء التطبيق", p -> Apk.rebuild(a, pr, p), r -> {
+                Apk.Result res = (Apk.Result) r;
+                new AlertDialog.Builder(a).setTitle("✅ انبنى التطبيق")
+                  .setMessage("انحفظ بالتنزيلات باسم:\n" + res.fileName + (res.apks.size() > 1 ? "\n(حزمة " + res.apks.size() + " ملفات، ثبّتها من هنا بزر التثبيت)" : "")
+                    + "\n\n⚠️ إذا النسخة الأصلية مثبتة، احذفها أول لأن التوقيع صار مختلف.")
+                  .setPositiveButton("📲 تثبيت", (x, y) -> U.runBg(a, "تجهيز التثبيت", p -> { Apk.install(a, res.apks); return null; }, z -> {}))
+                  .setNegativeButton("تمام", null).show();
               });
             }
             interface Toggle { void on(boolean v); }
@@ -831,6 +865,7 @@ jobs:
               }, x -> U.toast(this, "انحفظت بمجلد التنزيلات Download"));
             }
             @Override protected void onActivityResult(int req, int res, Intent data) {
+              if (req == REQ_SOUNDS) return;
               if (req == REQ_ATLAS) {
                 for (Apk.Img i : all) { boolean r2 = proj.repl(i.part, i.name).exists(); if (r2 != i.replaced) { i.replaced = r2; cache.remove(i.key()); } }
                 for (Apk.Img i : all) if (i.replaced) cache.remove(i.key());
@@ -884,17 +919,8 @@ jobs:
               for (Apk.Img i : all) if (s.contains(i.key())) { i.replaced = proj.repl(i.part, i.name).exists(); cache.remove(i.key()); }
               filter();
             }
-            void rebuild() {
-              if (Apk.countRepl(dir) == 0) { U.toast(this, "ما غيرت ولا صورة بعد"); return; }
-              U.runBg(this, "إعادة بناء التطبيق", p -> Apk.rebuild(this, proj, p), r -> {
-                Apk.Result res = (Apk.Result) r;
-                new AlertDialog.Builder(this).setTitle("✅ انبنى التطبيق")
-                  .setMessage("انحفظ بالتنزيلات باسم:\n" + res.fileName + (res.apks.size() > 1 ? "\n(حزمة " + res.apks.size() + " ملفات، ثبّتها من هنا بزر التثبيت)" : "")
-                    + "\n\n⚠️ إذا النسخة الأصلية مثبتة، احذفها أول لأن التوقيع صار مختلف.")
-                  .setPositiveButton("📲 تثبيت", (x, y) -> U.runBg(this, "تجهيز التثبيت", p -> { Apk.install(this, res.apks); return null; }, z -> {}))
-                  .setNegativeButton("تمام", null).show();
-              });
-            }
+            void rebuild() { rebuildFlow(this, proj, dir); }
+
             @Override protected void onDestroy() {
               pool.shutdownNow();
               if (proj != null) proj.close();
@@ -948,7 +974,7 @@ jobs:
             static final int REQ_PIECE = 31;
             Apk.Project proj; String part, name;
             int W, H, S, LW, LH; int[] lab; List<int[]> comps = new ArrayList<>(); /* {left, top, right, bottom, area, id} */
-            AtlasView view; TextView info; ImageView preview; LinearLayout bar; int sel = -1; int rot = 0;
+            AtlasView view; TextView info; ImageView preview; LinearLayout bar; int sel = -1; int rot = 0; boolean manual = false; Button manualBtn;
             int dp(float v) { return U.dp(this, v); }
 
             @Override protected void onCreate(Bundle b) {
@@ -969,7 +995,10 @@ jobs:
               btns.addView(small("🖼 بدّلها", U.GOLD, v -> pickPiece()), new LinearLayout.LayoutParams(0, dp(46), 1));
               btns.addView(small("⬇ صدّرها", U.CARD2, v -> exportPiece()), new LinearLayout.LayoutParams(0, dp(46), 1));
               btns.addView(small("↩ رجّعها", U.RED, v -> restorePiece()), new LinearLayout.LayoutParams(0, dp(46), 1));
-              bar.addView(btns); l.addView(bar);
+              bar.addView(btns);
+              manualBtn = small("✂️ تحديد يدوي (للصور بدون شفافية مثل car-icons)", U.CARD2, v -> toggleManual());
+              manualBtn.setLayoutParams(new LinearLayout.LayoutParams(-1, dp(44))); bar.addView(manualBtn);
+              l.addView(bar);
               setContentView(l);
               U.runBg(this, "تحليل الصورة", p -> { analyze(p); return null; }, r -> {
                 info.setText(W + "×" + H + " · لكيت " + comps.size() + " قطعة. اضغط على أي قطعة.");
@@ -980,6 +1009,22 @@ jobs:
               Button b = U.btn(this, t, c, l); b.setTextSize(13);
               LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(46), 1); lp.setMargins(dp(3), dp(6), dp(3), 0); b.setLayoutParams(lp); return b;
             }
+
+            void toggleManual() {
+              manual = !manual;
+              manualBtn.setText(manual ? "✋ رجوع للتحريك العادي" : "✂️ تحديد يدوي (للصور بدون شفافية مثل car-icons)");
+              info.setText(manual ? "اسحب إصبعك على الشاشة ترسم مربع حول المكان اللي تريد تبدله. (التكبير بإصبعين بعده يشتغل)" : "اضغط على أي قطعة.");
+            }
+            /* مربع يدوي: كل شي داخله ينحسب قطعة وحدة */
+            void addManual(int l, int t, int r, int b) {
+              l = Math.max(0, l); t = Math.max(0, t); r = Math.min(W, r); b = Math.min(H, b);
+              if (r - l < 4 || b - t < 4) return;
+              comps.add(new int[]{ l, t, r, b, (r - l) * (b - t), -1 });
+              int i = comps.size() - 1; sel = i; view.setSelected(i);
+              info.setText("مربع يدوي: " + (r - l) + "×" + (b - t) + " بكسل. هسه اضغط «بدّلها».");
+              new Thread(() -> { try { Bitmap pc = piece(readCurrent(), i); runOnUiThread(() -> preview.setImageBitmap(pc)); } catch (Exception ignored) {} }).start();
+            }
+            boolean mine(int[] c, int o) { return c[5] == -1 || o == c[5] || o == 0; }
 
             /* ---------- قراءة الصورة ---------- */
             Bitmap readOriginal() throws Exception {
@@ -1059,7 +1104,7 @@ jobs:
             Bitmap piece(Bitmap src, int i) {
               int[] c = comps.get(i); int w = c[2] - c[0], h = c[3] - c[1];
               int[] px = new int[w * h]; src.getPixels(px, 0, w, c[0], c[1], w, h);
-              for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) { int o = owner(c[0] + x, c[1] + y); if (o != c[5]) px[y * w + x] = 0; }
+              if (c[5] != -1) for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) { int o = owner(c[0] + x, c[1] + y); if (o != c[5]) px[y * w + x] = 0; }
               return Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888);
             }
 
@@ -1115,7 +1160,7 @@ jobs:
                 int[] src = new int[w * h]; np.getPixels(src, 0, w, 0, 0, w, h);
                 for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
                   int o = owner(c[0] + x, c[1] + y);
-                  if (o == c[5] || o == 0) dst[y * w + x] = src[y * w + x];
+                  if (mine(c, o)) dst[y * w + x] = src[y * w + x];
                 }
                 cur.setPixels(dst, 0, w, c[0], c[1], w, h);
                 p.set("حفظ الصورة..."); Apk.encode(cur, name, proj.repl(part, name)); return null;
@@ -1131,7 +1176,7 @@ jobs:
                 int[] c = comps.get(idx); int w = c[2] - c[0], h = c[3] - c[1];
                 int[] dst = new int[w * h], src = new int[w * h];
                 cur.getPixels(dst, 0, w, c[0], c[1], w, h); orig.getPixels(src, 0, w, c[0], c[1], w, h);
-                for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) { int o = owner(c[0] + x, c[1] + y); if (o == c[5] || o == 0) dst[y * w + x] = src[y * w + x]; }
+                for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) { int o = owner(c[0] + x, c[1] + y); if (mine(c, o)) dst[y * w + x] = src[y * w + x]; }
                 cur.setPixels(dst, 0, w, c[0], c[1], w, h);
                 Apk.encode(cur, name, rf); return null;
               }, r -> { U.toast(this, "رجعت القطعة الأصلية"); loadDisplay(); select2(idx); setResult(RESULT_OK); });
@@ -1177,13 +1222,36 @@ jobs:
               void setBitmap(Bitmap b, int fw) { bmp = b; fullW = fw; if (!fitted) fit(); invalidate(); }
               void setBoxes(List<int[]> b) { boxes = b; invalidate(); }
               void setSelected(int i) { selected = i; invalidate(); }
+              float[] toFull(float sx, float sy) {
+                Matrix inv = new Matrix(); m.invert(inv); float[] pt = { sx, sy }; inv.mapPoints(pt);
+                float k = (float) fullW / bmp.getWidth(); return new float[]{ pt[0] * k, pt[1] * k };
+              }
+              float[] dragA, dragB;
               void fit() {
                 if (bmp == null || getWidth() == 0) return;
                 float s = Math.min((float) getWidth() / bmp.getWidth(), (float) getHeight() / bmp.getHeight());
                 m.reset(); m.postScale(s, s); m.postTranslate((getWidth() - bmp.getWidth() * s) / 2, (getHeight() - bmp.getHeight() * s) / 2); fitted = true;
               }
               @Override protected void onSizeChanged(int w, int h, int ow, int oh) { if (!fitted) fit(); }
-              @Override public boolean onTouchEvent(MotionEvent e) { sg.onTouchEvent(e); if (!sg.isInProgress()) gd.onTouchEvent(e); return true; }
+              @Override public boolean onTouchEvent(MotionEvent e) {
+                sg.onTouchEvent(e);
+                if (manual && bmp != null) {
+                  if (e.getPointerCount() > 1 || sg.isInProgress()) { dragA = null; invalidate(); return true; }
+                  switch (e.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN: dragA = toFull(e.getX(), e.getY()); dragB = dragA; break;
+                    case MotionEvent.ACTION_MOVE: if (dragA != null) { dragB = toFull(e.getX(), e.getY()); invalidate(); } break;
+                    case MotionEvent.ACTION_UP:
+                      if (dragA != null) {
+                        addManual((int) Math.min(dragA[0], dragB[0]), (int) Math.min(dragA[1], dragB[1]), (int) Math.ceil(Math.max(dragA[0], dragB[0])), (int) Math.ceil(Math.max(dragA[1], dragB[1])));
+                        dragA = null; invalidate();
+                      }
+                      break;
+                  }
+                  return true;
+                }
+                if (!sg.isInProgress()) gd.onTouchEvent(e);
+                return true;
+              }
               @Override protected void onDraw(Canvas cv) {
                 if (bmp == null) return;
                 cv.save(); cv.concat(m);
@@ -1195,9 +1263,282 @@ jobs:
                   int[] c = boxes.get(i);
                   cv.drawRect(c[0] * k, c[1] * k, c[2] * k, c[3] * k, i == selected ? selP : box);
                 }
+                if (manual && dragA != null && dragB != null) {
+                  selP.setColor(0xFFE9C46A);
+                  cv.drawRect(Math.min(dragA[0], dragB[0]) * k, Math.min(dragA[1], dragB[1]) * k, Math.max(dragA[0], dragB[0]) * k, Math.max(dragA[1], dragB[1]) * k, selP);
+                  selP.setColor(0xFF22C55E);
+                }
                 cv.restore();
               }
             }
+          }
+          EOF
+          cat > $J/Sounds.java <<'EOF'
+          package com.apkimg.editor;
+          import android.content.Context;
+          import android.database.Cursor;
+          import android.media.*;
+          import android.net.Uri;
+          import android.provider.OpenableColumns;
+          import java.io.*;
+          import java.nio.ByteBuffer;
+          import java.nio.ByteOrder;
+          import java.util.*;
+          import java.util.zip.*;
+
+          public class Sounds {
+            static final String[] EXT = { ".ogg", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".opus", ".mid", ".midi", ".3gp", ".amr" };
+            public static String ext(String n) { String l = n.toLowerCase(Locale.ROOT); int i = l.lastIndexOf('.'); return i < 0 ? "" : l.substring(i); }
+            public static boolean isAudio(String n) { String e = ext(n); for (String x : EXT) if (x.equals(e)) return true; return false; }
+            public static List<Apk.Img> list(Apk.Project pr) {
+              List<Apk.Img> out = new ArrayList<>();
+              for (Map.Entry<String, ZipFile> pe : pr.parts.entrySet()) {
+                Set<String> seen = new HashSet<>();
+                for (ZipEntry e : Collections.list(pe.getValue().entries())) {
+                  if (e.isDirectory() || !isAudio(e.getName()) || !seen.add(e.getName())) continue;
+                  Apk.Img i = new Apk.Img(); i.part = pe.getKey(); i.name = e.getName(); i.size = e.getSize(); i.replaced = pr.repl(i.part, i.name).exists(); out.add(i);
+                }
+              }
+              return out;
+            }
+            /* يطلّع الصوت لملف مؤقت حتى نشغله */
+            public static File toPlayable(Context c, Apk.Project pr, Apk.Img s, boolean original) throws IOException {
+              File r = pr.repl(s.part, s.name);
+              if (!original && r.exists()) return r;
+              File out = new File(c.getCacheDir(), "play" + ext(s.name));
+              ZipFile z = pr.zip(s.part);
+              try (InputStream in = z.getInputStream(z.getEntry(s.name)); OutputStream o = new FileOutputStream(out)) { Apk.copy(in, o); }
+              return out;
+            }
+            public static String displayName(Context c, Uri u) {
+              try (Cursor cur = c.getContentResolver().query(u, new String[]{ OpenableColumns.DISPLAY_NAME }, null, null, null)) {
+                if (cur != null && cur.moveToFirst()) { String n = cur.getString(0); if (n != null) return n; }
+              } catch (Exception ignored) {}
+              String mime = c.getContentResolver().getType(u);
+              if (mime == null) return "sound";
+              if (mime.contains("ogg")) return "sound.ogg"; if (mime.contains("mpeg") || mime.contains("mp3")) return "sound.mp3";
+              if (mime.contains("wav")) return "sound.wav"; if (mime.contains("mp4") || mime.contains("m4a")) return "sound.m4a";
+              return "sound";
+            }
+            public static void copyRaw(Context c, Uri u, File out) throws IOException {
+              out.getParentFile().mkdirs();
+              try (InputStream in = c.getContentResolver().openInputStream(u); OutputStream o = new FileOutputStream(out)) { Apk.copy(in, o); }
+            }
+            /* يحول أي صوت (mp3, m4a, ogg...) إلى WAV باستعمال فك الترميز الموجود بالجوال */
+            public static void toWav(Context c, Uri u, File out) throws Exception {
+              out.getParentFile().mkdirs();
+              MediaExtractor ex = new MediaExtractor(); ex.setDataSource(c, u, null);
+              MediaFormat fmt = null; String mime = null;
+              for (int i = 0; i < ex.getTrackCount(); i++) {
+                MediaFormat f = ex.getTrackFormat(i); String m = f.getString(MediaFormat.KEY_MIME);
+                if (m != null && m.startsWith("audio/")) { ex.selectTrack(i); fmt = f; mime = m; break; }
+              }
+              if (fmt == null) { ex.release(); throw new Exception("الملف ما بيه صوت"); }
+              MediaCodec dec = MediaCodec.createDecoderByType(mime);
+              dec.configure(fmt, null, null, 0); dec.start();
+              int sr = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE), ch = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+              long total = 0;
+              try (RandomAccessFile raf = new RandomAccessFile(out, "rw")) {
+                raf.setLength(0); raf.write(new byte[44]);
+                MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+                boolean inEos = false, outEos = false; int idle = 0;
+                while (!outEos && idle < 2000) {
+                  if (!inEos) {
+                    int ii = dec.dequeueInputBuffer(10000);
+                    if (ii >= 0) {
+                      ByteBuffer b = dec.getInputBuffer(ii); int n = ex.readSampleData(b, 0);
+                      if (n < 0) { dec.queueInputBuffer(ii, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM); inEos = true; }
+                      else { dec.queueInputBuffer(ii, 0, n, ex.getSampleTime(), 0); ex.advance(); }
+                    }
+                  }
+                  int oi = dec.dequeueOutputBuffer(info, 10000);
+                  if (oi == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    MediaFormat of = dec.getOutputFormat();
+                    sr = of.getInteger(MediaFormat.KEY_SAMPLE_RATE); ch = of.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+                  } else if (oi >= 0) {
+                    idle = 0;
+                    ByteBuffer ob = dec.getOutputBuffer(oi);
+                    if (info.size > 0 && ob != null) { byte[] chunk = new byte[info.size]; ob.position(info.offset); ob.get(chunk); raf.write(chunk); total += info.size; }
+                    dec.releaseOutputBuffer(oi, false);
+                    if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) outEos = true;
+                  } else idle++;
+                }
+                ByteBuffer h = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN);
+                h.put("RIFF".getBytes("US-ASCII")).putInt((int) (36 + total)).put("WAVE".getBytes("US-ASCII"))
+                 .put("fmt ".getBytes("US-ASCII")).putInt(16).putShort((short) 1).putShort((short) ch).putInt(sr)
+                 .putInt(sr * ch * 2).putShort((short) (ch * 2)).putShort((short) 16)
+                 .put("data".getBytes("US-ASCII")).putInt((int) total);
+                raf.seek(0); raf.write(h.array());
+              } finally {
+                try { dec.stop(); } catch (Exception ignored) {}
+                dec.release(); ex.release();
+              }
+              if (total == 0) { out.delete(); throw new Exception("ما كدرت أحوّل الصوت"); }
+            }
+            public static int durationMs(File f) {
+              MediaMetadataRetriever r = new MediaMetadataRetriever();
+              try { r.setDataSource(f.getAbsolutePath()); String d = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION); return d == null ? -1 : Integer.parseInt(d); }
+              catch (Exception e) { return -1; }
+              finally { try { r.release(); } catch (Exception ignored) {} }
+            }
+            public static String fmtMs(int ms) { if (ms < 0) return "?"; return String.format(Locale.US, "%d:%02d.%d", ms / 60000, (ms / 1000) % 60, (ms / 100) % 10); }
+          }
+          EOF
+          cat > $J/SoundsActivity.java <<'EOF'
+          package com.apkimg.editor;
+          import android.app.*;
+          import android.content.*;
+          import android.media.MediaPlayer;
+          import android.net.Uri;
+          import android.os.*;
+          import android.text.*;
+          import android.view.*;
+          import android.widget.*;
+          import java.io.*;
+          import java.util.*;
+
+          public class SoundsActivity extends Activity {
+            static final int REQ_SND = 41;
+            File dir; Apk.Project proj; List<Apk.Img> all = new ArrayList<>(), shown = new ArrayList<>();
+            ListView list; EditText search; TextView info; Adapter adapter; boolean onlyEdited = false;
+            MediaPlayer player; String playingKey; Apk.Img pending;
+            int dp(float v) { return U.dp(this, v); }
+
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              getWindow().getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+              dir = new File(getIntent().getStringExtra("dir"));
+              LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setBackgroundColor(U.BG);
+              l.setPadding(dp(12), dp(16), dp(12), dp(10));
+              l.addView(U.tv(this, Apk.readName(dir), 21, U.GOLD));
+              l.addView(ProjectActivity.tabs(this, 1, () -> finish(), null));
+              info = U.tv(this, "جاري قراءة الأصوات...", 12, U.MUT); info.setPadding(0, dp(4), 0, dp(8)); l.addView(info);
+              search = new EditText(this); search.setHint("🔍 ابحث عن صوت (مثلاً engine أو crash)"); search.setSingleLine(true);
+              search.setTextColor(U.TXT); search.setHintTextColor(U.MUT); search.setBackground(U.bg(this, U.CARD2, 12)); search.setPadding(dp(12), dp(10), dp(12), dp(10));
+              search.addTextChangedListener(new TextWatcher() {
+                public void beforeTextChanged(CharSequence s, int a, int c, int d) {}
+                public void onTextChanged(CharSequence s, int a, int c, int d) {}
+                public void afterTextChanged(Editable s) { filter(); }
+              });
+              l.addView(search);
+              TextView chip = U.tv(this, "المعدّلة بس", 13, U.TXT); chip.setPadding(dp(12), dp(7), dp(12), dp(7)); chip.setBackground(U.bg(this, U.CARD2, 20));
+              chip.setOnClickListener(v -> { onlyEdited = !onlyEdited; chip.setBackground(U.bg(this, onlyEdited ? U.GOLD : U.CARD2, 20)); chip.setTextColor(onlyEdited ? 0xFF1A1300 : U.TXT); filter(); });
+              LinearLayout cr = new LinearLayout(this); cr.setPadding(0, dp(6), 0, dp(6)); cr.addView(chip); l.addView(cr);
+              list = new ListView(this); list.setDividerHeight(dp(6)); list.setDivider(new android.graphics.drawable.ColorDrawable(0));
+              adapter = new Adapter(); list.setAdapter(adapter);
+              list.setOnItemClickListener((p, v, pos, id) -> details(shown.get(pos)));
+              l.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
+              l.addView(U.btn(this, "🔨 إعادة البناء والتصدير للتنزيلات", U.GOLD, v -> ProjectActivity.rebuildFlow(this, proj, dir)));
+              setContentView(l);
+              U.runBg(this, "فتح الأصوات", p -> { proj = new Apk.Project(dir); return Sounds.list(proj); }, r -> {
+                @SuppressWarnings("unchecked") List<Apk.Img> s = (List<Apk.Img>) r; all = s; filter();
+              });
+            }
+            void filter() {
+              String q = search.getText().toString().trim().toLowerCase(Locale.ROOT);
+              shown = new ArrayList<>(); int edited = 0;
+              for (Apk.Img i : all) {
+                if (i.replaced) edited++;
+                if (onlyEdited && !i.replaced) continue;
+                if (!q.isEmpty() && !i.key().toLowerCase(Locale.ROOT).contains(q)) continue;
+                shown.add(i);
+              }
+              Collections.sort(shown, (a, c) -> a.name.compareTo(c.name));
+              info.setText(all.isEmpty() ? "ما لكيت ملفات صوت عادية بهذا التطبيق." : all.size() + " صوت · " + edited + " معدّل · معروض " + shown.size());
+              adapter.notifyDataSetChanged();
+            }
+            static String shortName(String n) { return n.substring(n.lastIndexOf('/') + 1); }
+            static String folder(String n) { int i = n.lastIndexOf('/'); return i < 0 ? "" : n.substring(0, i); }
+
+            class Adapter extends BaseAdapter {
+              public int getCount() { return shown.size(); }
+              public Object getItem(int p) { return shown.get(p); }
+              public long getItemId(int p) { return p; }
+              public View getView(int pos, View cv, ViewGroup parent) {
+                Apk.Img s = shown.get(pos);
+                LinearLayout row = new LinearLayout(SoundsActivity.this); row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setPadding(dp(8), dp(8), dp(8), dp(8)); row.setBackground(U.bg(SoundsActivity.this, U.CARD, 12));
+                TextView play = U.tv(SoundsActivity.this, s.key().equals(playingKey) ? "⏹" : "▶", 20, 0xFF1A1300);
+                play.setGravity(Gravity.CENTER); play.setBackground(U.bg(SoundsActivity.this, U.GOLD, 22));
+                play.setOnClickListener(v -> toggle(s, false));
+                row.addView(play, new LinearLayout.LayoutParams(dp(44), dp(44)));
+                LinearLayout t = new LinearLayout(SoundsActivity.this); t.setOrientation(LinearLayout.VERTICAL); t.setPadding(dp(10), 0, dp(6), 0);
+                TextView n = U.tv(SoundsActivity.this, (s.replaced ? "✏️ " : "") + shortName(s.name), 15, U.TXT); n.setSingleLine(true); n.setEllipsize(TextUtils.TruncateAt.MIDDLE); t.addView(n);
+                TextView m = U.tv(SoundsActivity.this, folder(s.name) + " · " + Math.max(1, s.size / 1024) + " KB", 11, U.MUT); m.setSingleLine(true); m.setEllipsize(TextUtils.TruncateAt.START); t.addView(m);
+                row.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+                return row;
+              }
+            }
+
+            /* ---------- التشغيل ---------- */
+            void stop() {
+              if (player != null) { try { player.stop(); } catch (Exception ignored) {} player.release(); player = null; }
+              playingKey = null; adapter.notifyDataSetChanged();
+            }
+            void toggle(Apk.Img s, boolean original) {
+              String k = s.key() + (original ? "#o" : "");
+              if (k.equals(playingKey) || s.key().equals(playingKey)) { stop(); return; }
+              stop();
+              try {
+                File f = Sounds.toPlayable(this, proj, s, original);
+                player = new MediaPlayer(); player.setDataSource(f.getAbsolutePath()); player.prepare();
+                player.setOnCompletionListener(mp -> stop());
+                player.start(); playingKey = s.key(); adapter.notifyDataSetChanged();
+              } catch (Exception e) { stop(); U.toast(this, "ما كدرت أشغّل هذا الصوت: " + e.getMessage()); }
+            }
+            @Override protected void onPause() { super.onPause(); stop(); }
+
+            /* ---------- التفاصيل والتبديل ---------- */
+            void details(Apk.Img s) {
+              LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setPadding(dp(16), dp(10), dp(16), dp(6));
+              TextView meta = U.tv(this, s.key(), 12, 0xFF555555); l.addView(meta);
+              l.addView(U.btn(this, "▶ شغّل الأصلي", U.CARD2, v -> toggle(s, true)));
+              if (s.replaced) l.addView(U.btn(this, "▶ شغّل الجديد", U.GRN, v -> toggle(s, false)));
+              new Thread(() -> {
+                try {
+                  int d0 = Sounds.durationMs(Sounds.toPlayable(this, proj, s, true));
+                  int d1 = s.replaced ? Sounds.durationMs(proj.repl(s.part, s.name)) : -1;
+                  runOnUiThread(() -> meta.setText(s.key() + "\nالصيغة: " + Sounds.ext(s.name) + " · المدة: " + Sounds.fmtMs(d0) + (s.replaced ? " · الجديد: " + Sounds.fmtMs(d1) : "")));
+                } catch (Exception ignored) {}
+              }).start();
+              AlertDialog.Builder bd = new AlertDialog.Builder(this).setTitle(shortName(s.name)).setView(l)
+                .setPositiveButton("🔁 بدّل الصوت", (x, y) -> {
+                  stop(); pending = s;
+                  Intent i = new Intent(Intent.ACTION_GET_CONTENT); i.setType("audio/*");
+                  i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{ "audio/*", "application/ogg" });
+                  startActivityForResult(Intent.createChooser(i, "اختار الصوت الجديد"), REQ_SND);
+                })
+                .setNeutralButton("⬇ حفظه", (x, y) -> save(s));
+              if (s.replaced) bd.setNegativeButton("↩ رجّع الأصلي", (x, y) -> { stop(); proj.repl(s.part, s.name).delete(); s.replaced = false; filter(); U.toast(this, "رجع الصوت الأصلي"); });
+              bd.setOnDismissListener(d -> stop());
+              bd.show();
+            }
+            void save(Apk.Img s) {
+              U.runBg(this, "حفظ الصوت", p -> {
+                File f = Sounds.toPlayable(this, proj, s, false);
+                return Apk.saveToDownloads(this, f, shortName(s.name), "application/octet-stream");
+              }, r -> U.toast(this, "انحفظ بمجلد التنزيلات Download"));
+            }
+            @Override protected void onActivityResult(int req, int res, Intent data) {
+              if (req != REQ_SND || res != RESULT_OK || data == null || data.getData() == null || pending == null) return;
+              Uri u = data.getData(); Apk.Img s = pending;
+              String srcExt = Sounds.ext(Sounds.displayName(this, u)), dstExt = Sounds.ext(s.name);
+              File out = proj.repl(s.part, s.name);
+              if (srcExt.equals(dstExt) || (dstExt.equals(".ogg") && srcExt.equals(".oga"))) { doReplace(s, () -> Sounds.copyRaw(this, u, out)); return; }
+              if (dstExt.equals(".wav")) { doReplace(s, () -> Sounds.toWav(this, u, out)); return; }
+              new AlertDialog.Builder(this).setTitle("الصيغة مختلفة")
+                .setMessage("الصوت الأصلي صيغته " + dstExt + " والجديد " + (srcExt.isEmpty() ? "غير معروفة" : srcExt) + ".\n\nأحسن شي تحوّل صوتك لنفس الصيغة " + dstExt
+                  + " بأي تطبيق تحويل صوت، وبعدين تختاره. إذا حطيته مثل ما هو، بعض الألعاب تشغله عادي وبعضها يطلع صامت.")
+                .setPositiveButton("حطه مثل ما هو", (x, y) -> doReplace(s, () -> Sounds.copyRaw(this, u, out)))
+                .setNegativeButton("إلغاء", null).show();
+            }
+            interface Job { void run() throws Exception; }
+            void doReplace(Apk.Img s, Job j) {
+              U.runBg(this, "تبديل الصوت", p -> { j.run(); return null; }, r -> {
+                s.replaced = proj.repl(s.part, s.name).exists(); filter(); U.toast(this, "✏️ تبدل الصوت. اضغط ▶ تسمعه");
+              });
+            }
+            @Override protected void onDestroy() { stop(); if (proj != null) proj.close(); super.onDestroy(); }
           }
           EOF
 
