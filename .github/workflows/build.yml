@@ -46,8 +46,8 @@ jobs:
               applicationId 'com.apkimg.editor'
               minSdk 29
               targetSdk 34
-              versionCode 6
-              versionName '1.5'
+              versionCode 7
+              versionName '1.6'
             }
             compileOptions {
               sourceCompatibility JavaVersion.VERSION_17
@@ -75,6 +75,8 @@ jobs:
               </activity>
               <receiver android:name=".InstallReceiver" android:exported="false"/>
               <activity android:name=".AtlasActivity" android:exported="false"/>
+              <activity android:name=".ConfigActivity" android:exported="false" android:windowSoftInputMode="adjustResize"/>
+              <activity android:name=".TextEditActivity" android:exported="false" android:windowSoftInputMode="adjustResize"/>
               <activity android:name=".SoundsActivity" android:exported="false" android:windowSoftInputMode="adjustResize"/>
               <activity android:name=".ProjectActivity" android:exported="false" android:windowSoftInputMode="adjustResize"/>
             </application>
@@ -701,7 +703,9 @@ jobs:
               LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setBackgroundColor(U.BG);
               l.setPadding(dp(12), dp(16), dp(12), dp(10));
               l.addView(U.tv(this, Apk.readName(dir), 21, U.GOLD));
-              l.addView(tabs(this, 0, null, () -> startActivityForResult(new Intent(this, SoundsActivity.class).putExtra("dir", dir.getAbsolutePath()), REQ_SOUNDS)));
+              l.addView(tabs(this, 0, new Runnable[]{ null,
+                () -> startActivityForResult(new Intent(this, SoundsActivity.class).putExtra("dir", dir.getAbsolutePath()), REQ_SOUNDS),
+                () -> startActivityForResult(new Intent(this, ConfigActivity.class).putExtra("dir", dir.getAbsolutePath()), REQ_SOUNDS) }));
               info = U.tv(this, "جاري قراءة الصور...", 12, U.MUT); info.setPadding(0, dp(4), 0, dp(8)); l.addView(info);
               search = new EditText(this); search.setHint("🔍 ابحث عن صورة (مثلاً car أو bg)"); search.setSingleLine(true);
               search.setTextColor(U.TXT); search.setHintTextColor(U.MUT); search.setBackground(U.bg(this, U.CARD2, 12)); search.setPadding(dp(12), dp(10), dp(12), dp(10));
@@ -726,14 +730,14 @@ jobs:
               });
             }
             /* خانات أعلى الشاشة: 🖼 الصور | 🔊 الأصوات */
-            static LinearLayout tabs(Activity a, int selected, Runnable toImages, Runnable toSounds) {
+            static LinearLayout tabs(Activity a, int selected, Runnable[] goTo) {
               LinearLayout t = new LinearLayout(a); t.setPadding(0, U.dp(a, 8), 0, 0);
-              String[] names = { "🖼 الصور", "🔊 الأصوات" };
-              for (int i = 0; i < 2; i++) {
-                TextView v = U.tv(a, names[i], 15, i == selected ? 0xFF1A1300 : U.TXT);
+              String[] names = { "🖼 الصور", "🔊 الأصوات", "📄 الإعدادات" };
+              for (int i = 0; i < 3; i++) {
+                TextView v = U.tv(a, names[i], 14, i == selected ? 0xFF1A1300 : U.TXT);
                 v.setGravity(Gravity.CENTER); v.setPadding(0, U.dp(a, 9), 0, U.dp(a, 9));
                 v.setBackground(U.bg(a, i == selected ? U.GOLD : U.CARD2, 12));
-                final Runnable go = i == 0 ? toImages : toSounds;
+                final Runnable go = goTo[i];
                 if (i != selected && go != null) v.setOnClickListener(x -> go.run());
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1); lp.setMargins(U.dp(a, 3), 0, U.dp(a, 3), 0);
                 t.addView(v, lp);
@@ -744,6 +748,7 @@ jobs:
             static void rebuildFlow(Activity a, Apk.Project pr, File dir) {
               if (pr == null) return;
               if (Apk.countRepl(dir) == 0) { U.toast(a, "ما غيرت ولا شي بعد"); return; }
+              a.getWindow().getDecorView().clearFocus();
               U.runBg(a, "إعادة بناء التطبيق", p -> Apk.rebuild(a, pr, p), r -> {
                 Apk.Result res = (Apk.Result) r;
                 new AlertDialog.Builder(a).setTitle("✅ انبنى التطبيق")
@@ -1411,7 +1416,8 @@ jobs:
               LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setBackgroundColor(U.BG);
               l.setPadding(dp(12), dp(16), dp(12), dp(10));
               l.addView(U.tv(this, Apk.readName(dir), 21, U.GOLD));
-              l.addView(ProjectActivity.tabs(this, 1, () -> finish(), null));
+              l.addView(ProjectActivity.tabs(this, 1, new Runnable[]{ this::finish, null,
+                () -> { startActivity(new Intent(this, ConfigActivity.class).putExtra("dir", dir.getAbsolutePath())); finish(); } }));
               info = U.tv(this, "جاري قراءة الأصوات...", 12, U.MUT); info.setPadding(0, dp(4), 0, dp(8)); l.addView(info);
               search = new EditText(this); search.setHint("🔍 ابحث عن صوت (مثلاً engine أو crash)"); search.setSingleLine(true);
               search.setTextColor(U.TXT); search.setHintTextColor(U.MUT); search.setBackground(U.bg(this, U.CARD2, 12)); search.setPadding(dp(12), dp(10), dp(12), dp(10));
@@ -1539,6 +1545,270 @@ jobs:
               });
             }
             @Override protected void onDestroy() { stop(); if (proj != null) proj.close(); super.onDestroy(); }
+          }
+          EOF
+          cat > $J/Configs.java <<'EOF'
+          package com.apkimg.editor;
+          import java.io.*;
+          import java.util.*;
+          import java.util.zip.*;
+
+          /* ملفات الإعدادات النصية داخل التطبيق (json, xml, txt, csv, lua ...) */
+          public class Configs {
+            static final String[] EXT = { ".json", ".xml", ".txt", ".csv", ".tsv", ".plist", ".ini", ".cfg", ".conf", ".lua", ".js", ".properties", ".yaml", ".yml", ".html", ".htm", ".tmx", ".tsx", ".atlas", ".fnt", ".strings", ".dat", ".config", ".def", ".tbl" };
+            public static boolean isConfig(String n) {
+              if (n.equals("AndroidManifest.xml") || n.startsWith("META-INF/")) return false;
+              if (n.startsWith("res/") && n.endsWith(".xml")) return false;   /* ملفات res المترجمة (ثنائية) */
+              String e = Sounds.ext(n); for (String x : EXT) if (x.equals(e)) return true; return false;
+            }
+            public static List<Apk.Img> list(Apk.Project pr) {
+              List<Apk.Img> out = new ArrayList<>();
+              for (Map.Entry<String, ZipFile> pe : pr.parts.entrySet()) {
+                Set<String> seen = new HashSet<>();
+                for (ZipEntry e : Collections.list(pe.getValue().entries())) {
+                  if (e.isDirectory() || !isConfig(e.getName()) || !seen.add(e.getName())) continue;
+                  Apk.Img i = new Apk.Img(); i.part = pe.getKey(); i.name = e.getName(); i.size = e.getSize(); i.replaced = pr.repl(i.part, i.name).exists(); out.add(i);
+                }
+              }
+              return out;
+            }
+            public static byte[] read(Apk.Project pr, Apk.Img f, boolean original) throws IOException {
+              File r = pr.repl(f.part, f.name);
+              InputStream in = (!original && r.exists()) ? new FileInputStream(r) : pr.zip(f.part).getInputStream(pr.zip(f.part).getEntry(f.name));
+              try (InputStream i = in) { ByteArrayOutputStream o = new ByteArrayOutputStream(); Apk.copy(i, o); return o.toByteArray(); }
+            }
+            /* نص لو ملف ثنائي/مشفّر؟ */
+            public static boolean isText(byte[] b) {
+              if (b.length >= 2 && b[0] == 3 && b[1] == 0) return false;          /* XML ثنائي */
+              if (b.length >= 6 && new String(b, 0, 6).equals("bplist")) return false;
+              int n = Math.min(b.length, 8192), bad = 0;
+              for (int i = 0; i < n; i++) { int c = b[i] & 255; if (c == 0) return false; if (c < 9 || (c > 13 && c < 32 && c != 27)) bad++; }
+              return n == 0 || bad * 100 / n < 2;
+            }
+            public static String text(byte[] b) {
+              int off = (b.length >= 3 && (b[0] & 255) == 0xEF && (b[1] & 255) == 0xBB && (b[2] & 255) == 0xBF) ? 3 : 0;
+              try { return new String(b, off, b.length - off, "UTF-8"); } catch (Exception e) { return new String(b); }
+            }
+            public static void save(Apk.Project pr, Apk.Img f, String s) throws IOException {
+              File r = pr.repl(f.part, f.name); r.getParentFile().mkdirs();
+              try (OutputStream o = new FileOutputStream(r)) { o.write(s.getBytes("UTF-8")); }
+            }
+            public static int count(String hay, String needle) {
+              if (needle.isEmpty()) return 0;
+              String h = hay.toLowerCase(Locale.ROOT), n = needle.toLowerCase(Locale.ROOT); int c = 0, i = 0;
+              while ((i = h.indexOf(n, i)) >= 0) { c++; i += n.length(); }
+              return c;
+            }
+            public static String snippet(String hay, String needle) {
+              int i = hay.toLowerCase(Locale.ROOT).indexOf(needle.toLowerCase(Locale.ROOT)); if (i < 0) return "";
+              int a = Math.max(0, i - 40), z = Math.min(hay.length(), i + needle.length() + 60);
+              return (a > 0 ? "…" : "") + hay.substring(a, z).replace('\n', ' ').replace('\r', ' ') + (z < hay.length() ? "…" : "");
+            }
+          }
+          EOF
+          cat > $J/ConfigActivity.java <<'EOF'
+          package com.apkimg.editor;
+          import android.app.*;
+          import android.content.*;
+          import android.graphics.Typeface;
+          import android.os.*;
+          import android.text.*;
+          import android.view.*;
+          import android.widget.*;
+          import java.io.*;
+          import java.util.*;
+
+          public class ConfigActivity extends Activity {
+            File dir; Apk.Project proj; List<Apk.Img> all = new ArrayList<>(), shown = new ArrayList<>();
+            Map<String, String> snippets = new HashMap<>(); Map<String, Integer> hits = new HashMap<>();
+            ListView list; EditText search; TextView info; Adapter adapter;
+            int dp(float v) { return U.dp(this, v); }
+
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              getWindow().getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+              dir = new File(getIntent().getStringExtra("dir"));
+              LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setBackgroundColor(U.BG);
+              l.setPadding(dp(12), dp(16), dp(12), dp(10));
+              l.addView(U.tv(this, Apk.readName(dir), 21, U.GOLD));
+              l.addView(ProjectActivity.tabs(this, 2, new Runnable[]{ this::finish,
+                () -> { startActivity(new Intent(this, SoundsActivity.class).putExtra("dir", dir.getAbsolutePath())); finish(); }, null }));
+              info = U.tv(this, "جاري قراءة الملفات...", 12, U.MUT); info.setPadding(0, dp(4), 0, dp(6)); l.addView(info);
+              LinearLayout sr = new LinearLayout(this);
+              search = new EditText(this); search.setHint("🔍 دوّر داخل الملفات (مثلاً chance)"); search.setSingleLine(true);
+              search.setTextColor(U.TXT); search.setHintTextColor(U.MUT); search.setBackground(U.bg(this, U.CARD2, 12)); search.setPadding(dp(12), dp(10), dp(12), dp(10));
+              search.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
+              search.setOnEditorActionListener((v, a, e) -> { deepSearch(); return true; });
+              sr.addView(search, new LinearLayout.LayoutParams(0, -2, 1));
+              Button go = U.btn(this, "بحث", U.GOLD, v -> deepSearch()); go.setLayoutParams(new LinearLayout.LayoutParams(dp(80), dp(46)));
+              sr.addView(go); l.addView(sr);
+              LinearLayout chips = new LinearLayout(this); chips.setPadding(0, dp(6), 0, dp(6));
+              for (String w : new String[]{ "chance", "probability", "rate", "weight", "drop" }) {
+                TextView c = U.tv(this, w, 12, U.TXT); c.setPadding(dp(10), dp(6), dp(10), dp(6)); c.setBackground(U.bg(this, U.CARD2, 16));
+                c.setOnClickListener(v -> { search.setText(w); deepSearch(); });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2); lp.setMargins(0, 0, dp(5), 0); chips.addView(c, lp);
+              }
+              HorizontalScrollView hs = new HorizontalScrollView(this); hs.addView(chips); l.addView(hs);
+              list = new ListView(this); list.setDividerHeight(dp(6)); list.setDivider(new android.graphics.drawable.ColorDrawable(0));
+              adapter = new Adapter(); list.setAdapter(adapter);
+              list.setOnItemClickListener((p, v, pos, id) -> open(shown.get(pos)));
+              l.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
+              l.addView(U.btn(this, "🔨 إعادة البناء والتصدير للتنزيلات", U.GOLD, v -> ProjectActivity.rebuildFlow(this, proj, dir)));
+              setContentView(l);
+              U.runBg(this, "فتح الملفات", p -> { proj = new Apk.Project(dir); return Configs.list(proj); }, r -> {
+                @SuppressWarnings("unchecked") List<Apk.Img> s = (List<Apk.Img>) r; all = s; showAll();
+              });
+            }
+            void showAll() {
+              hits.clear(); snippets.clear();
+              shown = new ArrayList<>(all); Collections.sort(shown, (a, c) -> a.name.compareTo(c.name));
+              int ed = 0; for (Apk.Img i : all) if (i.replaced) ed++;
+              info.setText(all.isEmpty() ? "ما لكيت ملفات إعدادات نصية بهذا التطبيق." : all.size() + " ملف · " + ed + " معدّل. اكتب كلمة واضغط بحث حتى يدوّر داخلها.");
+              adapter.notifyDataSetChanged();
+            }
+            /* يدوّر داخل محتوى كل الملفات */
+            void deepSearch() {
+              String q = search.getText().toString().trim();
+              if (q.isEmpty()) { showAll(); return; }
+              U.runBg(this, "البحث عن «" + q + "»", p -> {
+                List<Apk.Img> res = new ArrayList<>(); Map<String, Integer> h = new HashMap<>(); Map<String, String> sn = new HashMap<>(); int i = 0;
+                for (Apk.Img f : all) {
+                  i++; if (i % 20 == 0) p.set("فحص " + i + " / " + all.size());
+                  boolean nameHit = f.name.toLowerCase(Locale.ROOT).contains(q.toLowerCase(Locale.ROOT));
+                  if (f.size > 8_000_000 && !nameHit) continue;
+                  try {
+                    byte[] b = Configs.read(proj, f, false);
+                    if (!Configs.isText(b)) { if (nameHit) { res.add(f); h.put(f.key(), 0); sn.put(f.key(), "(ملف ثنائي/مشفّر، ما ينفتح كنص)"); } continue; }
+                    String t = Configs.text(b); int c = Configs.count(t, q);
+                    if (c > 0 || nameHit) { res.add(f); h.put(f.key(), c); sn.put(f.key(), Configs.snippet(t, q)); }
+                  } catch (Exception ignored) {}
+                }
+                Collections.sort(res, (a, c) -> Integer.compare(h.get(c.key()), h.get(a.key())));
+                hits = h; snippets = sn; return res;
+              }, r -> {
+                @SuppressWarnings("unchecked") List<Apk.Img> res = (List<Apk.Img>) r; shown = res;
+                info.setText(res.isEmpty() ? "ما لكيت «" + q + "» بأي ملف. جرّب كلمة ثانية." : "لكيت «" + q + "» بـ " + res.size() + " ملف. اضغط على ملف تفتحه.");
+                adapter.notifyDataSetChanged();
+              });
+            }
+            class Adapter extends BaseAdapter {
+              public int getCount() { return shown.size(); }
+              public Object getItem(int p) { return shown.get(p); }
+              public long getItemId(int p) { return p; }
+              public View getView(int pos, View cv, ViewGroup parent) {
+                Apk.Img f = shown.get(pos);
+                LinearLayout row = new LinearLayout(ConfigActivity.this); row.setOrientation(LinearLayout.VERTICAL);
+                row.setPadding(dp(10), dp(8), dp(10), dp(8)); row.setBackground(U.bg(ConfigActivity.this, U.CARD, 12));
+                Integer h = hits.get(f.key());
+                TextView n = U.tv(ConfigActivity.this, (f.replaced ? "✏️ " : "📄 ") + SoundsActivity.shortName(f.name) + (h != null && h > 0 ? "  (" + h + " نتيجة)" : ""), 15, U.TXT);
+                n.setSingleLine(true); n.setEllipsize(TextUtils.TruncateAt.MIDDLE); row.addView(n);
+                TextView m = U.tv(ConfigActivity.this, SoundsActivity.folder(f.name) + " · " + Math.max(1, f.size / 1024) + " KB", 11, U.MUT);
+                m.setSingleLine(true); m.setEllipsize(TextUtils.TruncateAt.START); row.addView(m);
+                String s = snippets.get(f.key());
+                if (s != null && !s.isEmpty()) { TextView sv = U.tv(ConfigActivity.this, s, 11, 0xFF9AD0FF); sv.setTypeface(Typeface.MONOSPACE); sv.setTextDirection(View.TEXT_DIRECTION_LTR); sv.setMaxLines(2); row.addView(sv); }
+                return row;
+              }
+            }
+            void open(Apk.Img f) {
+              if (f.size > 3_000_000) { U.toast(this, "الملف كبير هواية للتعديل من الجوال"); return; }
+              startActivityForResult(new Intent(this, TextEditActivity.class).putExtra("dir", dir.getAbsolutePath()).putExtra("part", f.part)
+                .putExtra("name", f.name).putExtra("q", search.getText().toString().trim()), 51);
+            }
+            @Override protected void onActivityResult(int req, int res, Intent data) {
+              if (req != 51 || proj == null) return;
+              for (Apk.Img i : all) i.replaced = proj.repl(i.part, i.name).exists();
+              adapter.notifyDataSetChanged();
+            }
+            @Override protected void onDestroy() { if (proj != null) proj.close(); super.onDestroy(); }
+          }
+          EOF
+          cat > $J/TextEditActivity.java <<'EOF'
+          package com.apkimg.editor;
+          import android.app.*;
+          import android.graphics.Typeface;
+          import android.os.*;
+          import android.text.*;
+          import android.text.style.BackgroundColorSpan;
+          import android.view.*;
+          import android.widget.*;
+          import java.io.*;
+          import java.util.*;
+
+          /* محرر نصوص بسيط مع بحث وتنقّل بين النتائج */
+          public class TextEditActivity extends Activity {
+            Apk.Project proj; Apk.Img f; EditText ed, find; TextView status; String original = ""; int lastPos = 0; boolean dirty = false;
+            int dp(float v) { return U.dp(this, v); }
+
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              f = new Apk.Img(); f.part = getIntent().getStringExtra("part"); f.name = getIntent().getStringExtra("name");
+              LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); l.setBackgroundColor(U.BG); l.setPadding(dp(10), dp(12), dp(10), dp(8));
+              TextView t = U.tv(this, "📄 " + SoundsActivity.shortName(f.name), 17, U.GOLD); t.setLayoutDirection(View.LAYOUT_DIRECTION_RTL); l.addView(t);
+              status = U.tv(this, "", 11, U.MUT); l.addView(status);
+              LinearLayout fr = new LinearLayout(this); fr.setPadding(0, dp(6), 0, dp(6));
+              find = new EditText(this); find.setSingleLine(true); find.setHint("بحث داخل الملف"); find.setText(getIntent().getStringExtra("q"));
+              find.setTextColor(U.TXT); find.setHintTextColor(U.MUT); find.setBackground(U.bg(this, U.CARD2, 10)); find.setPadding(dp(10), dp(8), dp(10), dp(8));
+              fr.addView(find, new LinearLayout.LayoutParams(0, -2, 1));
+              Button next = U.btn(this, "التالي ⬇", U.CARD2, v -> findNext()); next.setTextSize(13); next.setLayoutParams(new LinearLayout.LayoutParams(dp(90), dp(44)));
+              fr.addView(next); l.addView(fr);
+              ed = new EditText(this); ed.setTypeface(Typeface.MONOSPACE); ed.setTextSize(12); ed.setTextColor(U.TXT); ed.setGravity(Gravity.TOP | Gravity.START);
+              ed.setBackground(U.bg(this, 0xFF0F1530, 10)); ed.setPadding(dp(8), dp(8), dp(8), dp(8)); ed.setHorizontallyScrolling(true);
+              ed.setTextDirection(View.TEXT_DIRECTION_LTR); ed.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
+              ed.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+              l.addView(ed, new LinearLayout.LayoutParams(-1, 0, 1));
+              LinearLayout bt = new LinearLayout(this);
+              Button save = U.btn(this, "💾 حفظ", U.GOLD, v -> save()); bt.addView(save, new LinearLayout.LayoutParams(0, dp(50), 1));
+              Button rev = U.btn(this, "↩ الأصلي", U.RED, v -> revert()); bt.addView(rev, new LinearLayout.LayoutParams(0, dp(50), 1));
+              for (int i = 0; i < 2; i++) ((LinearLayout.LayoutParams) bt.getChildAt(i).getLayoutParams()).setMargins(dp(3), dp(6), dp(3), 0);
+              l.addView(bt);
+              setContentView(l);
+              U.runBg(this, "فتح الملف", p -> {
+                proj = new Apk.Project(new java.io.File(getIntent().getStringExtra("dir")));
+                byte[] cur = Configs.read(proj, f, false);
+                if (!Configs.isText(cur)) throw new Exception("هذا الملف ثنائي أو مشفّر، ما ينفتح كنص. القيم بداخله ما تتعدل من هنا.");
+                original = Configs.text(Configs.read(proj, f, true));
+                return Configs.text(cur);
+              }, r -> {
+                ed.setText((String) r);
+                status.setText(f.name + " · " + ((String) r).length() + " حرف" + (proj.repl(f.part, f.name).exists() ? " · ✏️ معدّل" : ""));
+                ed.addTextChangedListener(new TextWatcher() {
+                  public void beforeTextChanged(CharSequence s, int a, int c, int d) {}
+                  public void onTextChanged(CharSequence s, int a, int c, int d) { dirty = true; }
+                  public void afterTextChanged(Editable s) {}
+                });
+                if (find.getText().length() > 0) findNext();
+              });
+            }
+            void findNext() {
+              String q = find.getText().toString(); if (q.isEmpty()) return;
+              String t = ed.getText().toString().toLowerCase(Locale.ROOT); String ql = q.toLowerCase(Locale.ROOT);
+              int i = t.indexOf(ql, lastPos); if (i < 0) i = t.indexOf(ql);
+              if (i < 0) { U.toast(this, "ما لكيت «" + q + "»"); return; }
+              Editable e = ed.getText();
+              for (BackgroundColorSpan s : e.getSpans(0, e.length(), BackgroundColorSpan.class)) e.removeSpan(s);
+              e.setSpan(new BackgroundColorSpan(0x99E9C46A), i, i + q.length(), Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+              ed.requestFocus(); ed.setSelection(i + q.length()); lastPos = i + q.length();
+              int line = 1; for (int k = 0; k < i; k++) if (t.charAt(k) == '\n') line++;
+              status.setText("السطر " + line + " · اضغط على الرقم وغيّره، وبعدين 💾 حفظ");
+            }
+            void save() {
+              String s = ed.getText().toString();
+              U.runBg(this, "حفظ", p -> {
+                if (s.equals(original)) proj.repl(f.part, f.name).delete(); else Configs.save(proj, f, s);
+                return null;
+              }, r -> { dirty = false; setResult(RESULT_OK); U.toast(this, "💾 انحفظ. لا تنسى «إعادة البناء»"); status.setText(f.name + " · ✏️ معدّل"); });
+            }
+            void revert() {
+              new AlertDialog.Builder(this).setTitle("ترجّع الملف الأصلي؟").setMessage("كل تعديلاتك على هذا الملف تنمسح.")
+                .setPositiveButton("رجّع", (x, y) -> { proj.repl(f.part, f.name).delete(); ed.setText(original); dirty = false; setResult(RESULT_OK); U.toast(this, "رجع الأصلي"); })
+                .setNegativeButton("لا", null).show();
+            }
+            @Override public void onBackPressed() {
+              if (!dirty) { super.onBackPressed(); return; }
+              new AlertDialog.Builder(this).setTitle("ما حفظت التعديلات").setPositiveButton("احفظ", (x, y) -> save())
+                .setNegativeButton("اطلع بدون حفظ", (x, y) -> finish()).show();
+            }
+            @Override protected void onDestroy() { if (proj != null) proj.close(); super.onDestroy(); }
           }
           EOF
 
